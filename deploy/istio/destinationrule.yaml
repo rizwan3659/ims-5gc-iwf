@@ -1,0 +1,20 @@
+# Optional overlay: mesh-provided mTLS + outlier ejection towards 5GC NFs.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: iwf-to-5gc
+  namespace: ims-interworking
+spec:
+  host: "*.5gc.svc.cluster.local"
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+    connectionPool:
+      http:
+        http2MaxRequests: 10000
+        maxRequestsPerConnection: 0   # unlimited; h2 multiplexing
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 5s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50

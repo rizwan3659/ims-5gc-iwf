@@ -1,0 +1,24 @@
+# CDOT-iwf translation rules (running environment, etc/).
+# Tuned for Open5GS. Subscriber IMSI and PLMN below are deployment-specific —
+# change them to a subscriber provisioned in your Open5GS UDR.
+#
+# NOTE: literal JSON braces in query/body values MUST be escaped as {{ }} so
+# they are not read as {var} placeholders (the plmn-id value below).
+rules:
+  - id: cx_uar_to_open5gs_udm
+    trigger:
+      diameter_application: 16777216   # Cx
+      command_code: 300                # UAR
+    actions:
+      - extract: { avp: "User-Name", as: impi }
+      - http_request:
+          method: GET
+          nf_type: UDM
+          path: "/nudm-sdm/v2/imsi-999700000000001/am-data"
+          query:
+            plmn-id: "{{\"mcc\":\"999\",\"mnc\":\"70\"}}"
+      - map_response:
+          200: build_uaa_success
+          404: build_uaa_user_unknown
+          default: build_uaa_unable_to_comply
+    version: "open5gs"

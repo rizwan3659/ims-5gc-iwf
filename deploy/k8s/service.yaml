@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: iwf
+  namespace: ims-interworking
+  labels: { app: iwf }
+spec:
+  type: ClusterIP
+  selector: { app: iwf }
+  ports:
+    - { name: diameter, port: 3868, targetPort: diameter }
+    - { name: admin, port: 8080, targetPort: admin }
+    - { name: metrics, port: 9090, targetPort: metrics }
+---
+# Headless service: stable per-pod DNS for Diameter peer configuration
+# (peers address individual pods; Diameter is connection-oriented).
+apiVersion: v1
+kind: Service
+metadata:
+  name: iwf-peers
+  namespace: ims-interworking
+  labels: { app: iwf }
+spec:
+  clusterIP: None
+  selector: { app: iwf }
+  ports:
+    - { name: diameter, port: 3868, targetPort: diameter }

@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "iwf.fullname" . }}
+  labels: {{- include "iwf.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 1 }
+  selector:
+    matchLabels:
+      app: {{ include "iwf.fullname" . }}
+  template:
+    metadata:
+      labels: {{- include "iwf.labels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ add .Values.drainTimeoutS 15 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: {{ include "iwf.fullname" . }}
+              topologyKey: topology.kubernetes.io/zone
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/region
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: {{ include "iwf.fullname" . }}
+      containers:
+        - name: iwf
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: diameter, containerPort: 3868 }
+            - { name: admin, containerPort: 8080 }
+            - { name: metrics, containerPort: 9090 }
+          env:
+            - { name: IWF_CONFIG, value: /etc/iwf/config.yaml }
+            - { name: IWF_LOG_LEVEL, value: {{ .Values.logLevel | quote }} }
+            - name: IWF_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.oauth.secretName }}, key: client-id }
+            - name: IWF_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.oauth.secretName }}, key: client-secret }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: admin }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: admin }
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /etc/iwf, readOnly: true }
+            - { name: tls, mountPath: /etc/iwf/tls, readOnly: true }
+            - { name: admin-jwt, mountPath: /etc/iwf/admin-jwt, readOnly: true }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "iwf.fullname" . }}-config
+        - name: tls
+          secret: { secretName: {{ .Values.tls.secretName }} }
+        - name: admin-jwt
+          secret: { secretName: {{ .Values.adminJwt.secretName }} }

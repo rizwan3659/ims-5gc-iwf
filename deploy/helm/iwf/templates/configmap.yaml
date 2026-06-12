@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iwf.fullname" . }}-config
+  labels: {{- include "iwf.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    diameter:
+      listen: "0.0.0.0:3868"
+      origin_host: "{{ .Values.diameter.originHost }}"
+      origin_realm: "{{ .Values.diameter.originRealm }}"
+      watchdog_interval_s: {{ .Values.diameter.watchdogIntervalS }}
+      transaction_timeout_ms: {{ .Values.diameter.transactionTimeoutMs }}
+      max_in_flight: {{ .Values.diameter.maxInFlight }}
+    sba:
+      nrf_uri: "{{ .Values.sba.nrfUri }}"
+      request_timeout_ms: {{ .Values.sba.requestTimeoutMs }}
+      discovery_ttl_s: {{ .Values.sba.discoveryTtlS }}
+    admin:
+      listen: "0.0.0.0:8080"
+      metrics_listen: "0.0.0.0:9090"
+      jwt_rs256_public_key: "/etc/iwf/admin-jwt/public.pem"
+      jwt_audience: "{{ .Values.adminJwt.audience }}"
+    rules_file: "/etc/iwf/rules.yaml"
+    drain_timeout_s: {{ .Values.drainTimeoutS }}
+  rules.yaml: |
+{{ .Values.rules | indent 4 }}

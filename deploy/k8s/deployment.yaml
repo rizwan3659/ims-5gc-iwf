@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iwf
+  namespace: ims-interworking
+  labels: { app: iwf }
+spec:
+  replicas: 6        # 100k TPS basis: 4-core pod ≥25k TPS, +N+2 headroom
+  strategy:
+    rollingUpdate: { maxUnavailable: 1, maxSurge: 1 }
+  selector:
+    matchLabels: { app: iwf }
+  template:
+    metadata:
+      labels: { app: iwf }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: iwf
+      terminationGracePeriodSeconds: 45   # > drain_timeout_s (30) + margin
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: iwf }
+              topologyKey: topology.kubernetes.io/zone
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/region
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: iwf }
+      containers:
+        - name: iwf
+          image: registry.example.org/ims/iwf:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: diameter, containerPort: 3868 }
+            - { name: admin, containerPort: 8080 }
+            - { name: metrics, containerPort: 9090 }
+          env:
+            - { name: IWF_CONFIG, value: /etc/iwf/config.yaml }
+            - { name: IWF_LOG_LEVEL, value: info }
+            - name: IWF_OAUTH_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: iwf-oauth, key: client-id } }
+            - name: IWF_OAUTH_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: iwf-oauth, key: client-secret } }
+          # Sizing rationale: hot path is I/O + small CPU bursts; 4 cores
+          # sustain ≥25k TPS with p99 headroom (validated via loadgen,
+          # runbook §Benchmarking). Memory: frame buffers + pools + h2
+          # windows stay <1Gi at full load; 2Gi limit leaves soak margin.
+          # requests == limits (Guaranteed QoS) so the tokio worker count
+          # (= cgroup quota) and the latency SLO are stable under pressure.
+          resources:
+            requests: { cpu: "4", memory: 2Gi }
+            limits: { cpu: "4", memory: 2Gi }
+          readinessProbe:
+            httpGet: { path: /readyz, port: admin }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: admin }
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /etc/iwf, readOnly: true }
+            - { name: tls, mountPath: /etc/iwf/tls, readOnly: true }
+            - { name: admin-jwt, mountPath: /etc/iwf/admin-jwt, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: iwf-config }
+        - name: tls
+          secret: { secretName: iwf-tls }       # rotation: update Secret;
+        - name: admin-jwt                        # inotify reload, no restart
+          secret: { secretName: iwf-admin-jwt }

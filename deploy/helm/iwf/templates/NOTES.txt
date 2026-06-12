@@ -1,0 +1,28 @@
+IWF {{ .Chart.AppVersion }} deployed as release {{ .Release.Name }}.
+
+Post-install verification:
+
+1. Pods ready (readiness gates on NRF registration + peer connectivity):
+     kubectl -n {{ .Release.Namespace }} get pods -l app={{ include "iwf.fullname" . }}
+   Pods stay NotReady until a Diameter peer completes CER/CEA — expected
+   on a fresh install before IMS peers are pointed at the service.
+
+2. Health:
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "iwf.fullname" . }} -- \
+       wget -qO- http://localhost:8080/healthz
+
+3. NRF registration (look for "registered with NRF"):
+     kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "iwf.fullname" . }} | grep NRF
+
+4. Metrics scrape:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "iwf.fullname" . }} 9090:9090
+     curl -s localhost:9090/metrics | grep iwf_
+
+5. Point IMS peers (I-/S-CSCF, AS) at:
+     {{ include "iwf.fullname" . }}.{{ .Release.Namespace }}.svc:3868
+   (or per-pod via {{ include "iwf.fullname" . }}-peers headless DNS).
+
+6. Load the operator ruleset (provisioning JWT required):
+     curl -X PUT --data-binary @rules.yaml \
+       -H "Authorization: Bearer $TOKEN" \
+       http://<admin>/admin/v1/rules

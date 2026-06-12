@@ -1,0 +1,23 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: iwf
+  namespace: ims-interworking
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: iwf
+  minReplicas: 4
+  maxReplicas: 24
+  metrics:
+    # Requires prometheus-adapter exposing this as a pods metric:
+    # rate(iwf_diameter_requests_total[2m]) per pod.
+    - type: Pods
+      pods:
+        metric: { name: iwf_diameter_requests_per_second }
+        target: { type: AverageValue, averageValue: "20000" }
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies: [{ type: Pods, value: 1, periodSeconds: 120 }]

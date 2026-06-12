@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: iwf
+  namespace: ims-interworking
+spec:
+  podSelector:
+    matchLabels: { app: iwf }
+  policyTypes: [Ingress]
+  ingress:
+    # Diameter from the IMS signaling network only.
+    - from:
+        - namespaceSelector:
+            matchLabels: { network.example.org/zone: ims-signaling }
+      ports:
+        - { protocol: TCP, port: 3868 }
+    # Admin from the operations namespace; metrics from monitoring.
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: operations }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - from:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: monitoring }
+      ports:
+        - { protocol: TCP, port: 9090 }

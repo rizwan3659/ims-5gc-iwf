@@ -1,0 +1,112 @@
+#!/bin/sh
+# CDOT-iwf service control script.
+#
+# Usage: cdot_iwf {start|stop|restart|status}
+#
+# Self-locating: derives the install root from its own path, so the whole
+# CDOT-iwf/ tree can be installed anywhere and moved without edits.
+#
+#   <root>/bin/cdot_iwf   (this script)
+#   <root>/bin/iwf-node   (the binary)
+#   <root>/etc/*.yaml      (config + rules)
+#   <root>/etc/cdot_iwf.env (environment: secret, NRF requester type, ...)
+#   <root>/lib/*           (bundled shared libraries)
+#   <root>/log/cdot_iwf.log (runtime log)
+#   <root>/run/cdot_iwf.pid (pid file)
+
+set -eu
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+BIN_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+ROOT="$(dirname "$BIN_DIR")"
+
+BINARY="$BIN_DIR/iwf-node"
+ENV_FILE="$ROOT/etc/cdot_iwf.env"
+PID_FILE="$ROOT/run/cdot_iwf.pid"
+LOG_DIR="$ROOT/log"
+LOG_FILE="$LOG_DIR/cdot_iwf.log"
+
+mkdir -p "$ROOT/run" "$LOG_DIR"
+
+# Bundled libraries take precedence over system ones.
+export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Runtime environment (config path, admin secret, NRF requester type, etc.).
+if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+fi
+: "${IWF_CONFIG:=$ROOT/etc/config.yaml}"
+export IWF_CONFIG
+
+is_running() {
+    [ -f "$PID_FILE" ] || return 1
+    _pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    [ -n "${_pid:-}" ] && kill -0 "$_pid" 2>/dev/null
+}
+
+start() {
+    if is_running; then
+        echo "cdot_iwf already running (pid $(cat "$PID_FILE"))"
+        return 0
+    fi
+    [ -x "$BINARY" ] || { echo "ERROR: binary not found or not executable: $BINARY" >&2; exit 1; }
+    [ -f "$IWF_CONFIG" ] || { echo "ERROR: config not found: $IWF_CONFIG" >&2; exit 1; }
+    echo "Starting cdot_iwf ..."
+    setsid "$BINARY" >> "$LOG_FILE" 2>&1 < /dev/null &
+    echo "$!" > "$PID_FILE"
+    sleep 2
+    if is_running; then
+        echo "Started (pid $(cat "$PID_FILE")). Log: $LOG_FILE"
+    else
+        echo "ERROR: cdot_iwf failed to start. Last log lines:" >&2
+        tail -n 20 "$LOG_FILE" >&2 || true
+        rm -f "$PID_FILE"
+        exit 1
+    fi
+}
+
+stop() {
+    if ! is_running; then
+        echo "cdot_iwf not running"
+        rm -f "$PID_FILE"
+        return 0
+    fi
+    _pid="$(cat "$PID_FILE")"
+    echo "Stopping cdot_iwf (pid $_pid) ... (graceful drain, up to 45s)"
+    kill -TERM "$_pid" 2>/dev/null || true
+    _i=0
+    while kill -0 "$_pid" 2>/dev/null; do
+        _i=$((_i + 1))
+        if [ "$_i" -ge 45 ]; then
+            echo "drain timeout exceeded; forcing stop"
+            kill -KILL "$_pid" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+    rm -f "$PID_FILE"
+    echo "Stopped."
+}
+
+status() {
+    if is_running; then
+        _pid="$(cat "$PID_FILE")"
+        echo "cdot_iwf: RUNNING (pid $_pid)"
+        if command -v ss >/dev/null 2>&1; then
+            ss -tlnp 2>/dev/null | grep "pid=$_pid," | awk '{print "  listening: " $4}'
+        fi
+        exit 0
+    else
+        echo "cdot_iwf: STOPPED"
+        exit 3
+    fi
+}
+
+case "${1:-}" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; start ;;
+    status)  status ;;
+    *)       echo "Usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac

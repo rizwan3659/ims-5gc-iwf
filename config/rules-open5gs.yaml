@@ -1,0 +1,66 @@
+# Translation rules tuned for an Open5GS 5G core.
+#
+# Why this differs from config/rules.yaml:
+#   * Open5GS UDM fully implements Nudm_SDM (`/nudm-sdm/v2/{supi}/am-data`)
+#     and it returns provisioned subscriber data — this is the most reliable
+#     "we really talked to the UDM" endpoint to test against.
+#   * Open5GS UDM SDM requires a `plmn-id` query parameter, JSON-encoded
+#     (the IWF percent-encodes the value for you).
+#   * `{supi}` must be the IMSI-form SUPI of a subscriber provisioned in the
+#     Open5GS database (see docs/deploy-open5gs.md §5).
+#
+# Two rules are provided:
+#   1. cx_sar_smoke_open5gs  — connectivity/translation smoke. The SUPI is
+#      hardcoded so the stock `loadgen` (which always sends the same UAR)
+#      drives a real UDM call without any client changes. Use this first to
+#      prove the IWF reaches Open5GS UDM end to end.
+#   2. cx_sar_open5gs         — production-shaped: the SUPI comes from the
+#      request's User-Name. Use this with a test client that sends
+#      User-Name = "imsi-<IMSI>" (see the guide).
+#
+# Only ONE rule may match a given (application, command) at a time unless you
+# split them by rollout_percent. Keep exactly one of the two enabled.
+
+rules:
+  # ---- 1. SMOKE: fixed SUPI, works with stock loadgen ---------------------
+  - id: cx_sar_smoke_open5gs
+    trigger:
+      diameter_application: 16777216   # Cx
+      command_code: 300                # UAR (what loadgen sends)
+    actions:
+      - extract: { avp: "User-Name", as: impi }
+      - http_request:
+          method: GET
+          nf_type: UDM
+          # IMSI 001011234567890 must exist in the Open5GS subscriber DB.
+          path: "/nudm-sdm/v2/imsi-001011234567890/am-data"
+          query:
+            # Must match the subscriber's PLMN provisioned in Open5GS.
+            plmn-id: '{{"mcc":"001","mnc":"01"}}'
+      - map_response:
+          200: build_uaa_success
+          404: build_uaa_user_unknown
+          default: build_uaa_unable_to_comply
+    version: "open5gs-smoke"
+
+  # ---- 2. PRODUCTION-SHAPED: SUPI from the request ------------------------
+  #     Enable this (and disable the smoke rule above) when driving the test
+  #     with a client that sets User-Name to a SUPI, e.g. "imsi-001011234567890".
+  #
+  # - id: cx_sar_open5gs
+  #   trigger:
+  #     diameter_application: 16777216
+  #     command_code: 301              # SAR
+  #   actions:
+  #     - extract: { avp: "User-Name", as: supi }
+  #     - http_request:
+  #         method: GET
+  #         nf_type: UDM
+  #         path: "/nudm-sdm/v2/{supi}/am-data"
+  #         query:
+  #           plmn-id: '{{"mcc":"001","mnc":"01"}}'
+  #     - map_response:
+  #         200: build_success
+  #         404: build_user_unknown
+  #         default: build_unable_to_comply
+  #   version: "open5gs-rel18"
