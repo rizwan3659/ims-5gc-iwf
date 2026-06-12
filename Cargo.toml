@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "iwf-core",
+    "iwf-diameter",
+    "iwf-sba",
+    "iwf-translation",
+    "iwf-discovery",
+    "iwf-security",
+    "iwf-observability",
+    "iwf-admin",
+    "iwf-config",
+    "iwf-benchmark",
+    "iwf-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+authors = ["IWF Team"]
+repository = "https://example.invalid/iwf"
+
+# Versions are pinned exactly: the build toolchain is rustc 1.75 and cargo 1.75
+# does not perform MSRV-aware resolution, so floating semver ranges can silently
+# pull releases that require a newer compiler.
+[workspace.dependencies]
+iwf-core = { path = "iwf-core" }
+iwf-diameter = { path = "iwf-diameter" }
+iwf-sba = { path = "iwf-sba" }
+iwf-translation = { path = "iwf-translation" }
+iwf-discovery = { path = "iwf-discovery" }
+iwf-security = { path = "iwf-security" }
+iwf-observability = { path = "iwf-observability" }
+iwf-admin = { path = "iwf-admin" }
+iwf-config = { path = "iwf-config" }
+
+bytes = { version = "=1.5.0", features = ["serde"] }
+tokio = { version = "=1.35.1", features = ["full"] }
+thiserror = "=1.0.56"
+serde = { version = "=1.0.195", features = ["derive"] }
+serde_json = "=1.0.111"
+serde_yaml = "=0.9.30"
+toml = "=0.8.8"
+dashmap = "=5.5.3"
+tracing = "=0.1.40"
+tracing-subscriber = { version = "=0.3.18", features = ["json", "env-filter"] }
+http = "=1.0.0"
+hyper = { version = "=1.1.0", features = ["http1", "http2", "client", "server"] }
+hyper-util = { version = "=0.1.2", features = ["client", "client-legacy", "http2", "server", "tokio"] }
+http-body-util = "=0.1.0"
+axum = "=0.7.4"
+tower = { version = "=0.4.13", features = ["util", "timeout", "limit"] }
+rand = "=0.8.5"
+parking_lot = "=0.12.1"
+arc-swap = "=1.6.0"
+notify = "=6.1.1"
+rustls = "=0.22.2"
+tokio-rustls = "=0.25.0"
+rustls-pemfile = "=2.0.0"
+jsonwebtoken = "=9.2.0"
+prometheus = "=0.13.3"
+futures = "=0.3.30"
+async-trait = "=0.1.77"
+uuid = { version = "=1.7.0", features = ["v4"] }
+base64 = "=0.21.7"
+criterion = "=0.5.1"
+proptest = "=1.4.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+debug = true

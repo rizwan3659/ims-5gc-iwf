@@ -1,0 +1,28 @@
+[package]
+name = "iwf-discovery"
+description = "NRF registration, heartbeat, discovery and endpoint cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+iwf-core = { workspace = true }
+iwf-sba = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dashmap = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

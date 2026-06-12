@@ -1,0 +1,21 @@
+[package]
+name = "iwf-core"
+description = "Domain model, ports, and shared types for the IMS/5GC Interworking Function"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Hexagonal-architecture rule: this crate carries domain logic only.
+# Allowed dependencies are limited to error derivation, byte buffers,
+# serde data-shape derives, and the async trait shim for port definitions.
+# No transport, runtime, or infrastructure crates may be added here.
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

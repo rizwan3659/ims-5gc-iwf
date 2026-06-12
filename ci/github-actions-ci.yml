@@ -1,0 +1,83 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+        with: { components: "clippy, rustfmt" }
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (deny all)
+        run: cargo clippy --workspace --all-targets --locked -- -D clippy::all
+      - name: Forbid unwrap/expect/panic in non-test code
+        # --lib --bins excludes test targets and cfg(test) modules, so the
+        # gate applies exactly to production paths.
+        run: >
+          cargo clippy --workspace --lib --bins --locked --
+          -D clippy::all
+          -D clippy::unwrap_used
+          -D clippy::expect_used
+          -D clippy::panic
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Bench compile check (regression harness)
+        run: cargo bench -p iwf-benchmark --no-run --locked
+
+  coverage:
+    runs-on: ubuntu-latest
+    # Tarpaulin needs a newer toolchain than the pinned MSRV; informational
+    # until the fleet toolchain moves (production-readiness OPEN item).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-tarpaulin --locked
+      - name: Coverage gate >90%
+        run: cargo tarpaulin --workspace --fail-under 90 --timeout 600
+
+  bench-regression:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75
+      - uses: Swatinem/rust-cache@v2
+      - name: Criterion baseline compare
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth 1
+          git checkout FETCH_HEAD -- . || true
+          cargo bench -p iwf-benchmark -- --save-baseline base || true
+          git checkout ${{ github.sha }} -- .
+          cargo bench -p iwf-benchmark -- --baseline base
+
+  image:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: iwf:${{ github.sha }}
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint deploy/helm/iwf
+      - run: helm template iwf deploy/helm/iwf >/dev/null

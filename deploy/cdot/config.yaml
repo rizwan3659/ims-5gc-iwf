@@ -1,0 +1,28 @@
+# CDOT-iwf runtime configuration (running environment, etc/).
+# Paths are absolute inside the default install root /opt/CDOT-iwf.
+# If you install elsewhere, update rules_file here and IWF_CONFIG in
+# etc/cdot_iwf.env.
+diameter:
+  # Dedicated loopback so it doesn't clash with Open5GS NFs already on 3868.
+  listen: "127.0.0.99:3868"
+  origin_host: "iwf.epc.example.org"
+  origin_realm: "epc.example.org"
+  watchdog_interval_s: 30
+  transaction_timeout_ms: 5000
+  max_in_flight: 50000
+
+sba:
+  # Open5GS NRF SBI.
+  nrf_uri: "http://127.0.0.10:7777"
+  request_timeout_ms: 2000
+  discovery_ttl_s: 300
+
+admin:
+  listen: "127.0.0.1:8080"
+  metrics_listen: "127.0.0.1:9090"
+  jwt_hs256_secret_env: "IWF_ADMIN_JWT_SECRET"
+  jwt_audience: "iwf-admin"
+
+rules_file: "/opt/CDOT-iwf/etc/rules.yaml"
+
+drain_timeout_s: 30

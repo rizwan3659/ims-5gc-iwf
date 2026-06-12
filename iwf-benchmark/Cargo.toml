@@ -1,0 +1,27 @@
+[package]
+name = "iwf-benchmark"
+description = "Criterion benchmarks and 100k TPS load generator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+iwf-core = { workspace = true }
+iwf-diameter = { workspace = true }
+iwf-translation = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "codec"
+harness = false
+
+[dependencies.axum]
+workspace = true
+[dependencies.serde_json]
+workspace = true

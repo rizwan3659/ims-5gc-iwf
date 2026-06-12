@@ -1,0 +1,23 @@
+[package]
+name = "iwf-observability"
+description = "Prometheus metrics, structured logging, correlation ids"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Cleartext subscriber identities in logs. Never enable in production
+# without a lawful-intercept-grade justification.
+pii-logging = []
+# OTLP span export wiring (pulls the OpenTelemetry stack). Off by default.
+otlp = []

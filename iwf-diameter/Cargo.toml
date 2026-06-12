@@ -1,0 +1,22 @@
+[package]
+name = "iwf-diameter"
+description = "Standalone Diameter stack (RFC 6733 + 3GPP Cx/Sh/Dx/SWx/Zh)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+iwf-core = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+rand = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,31 @@
+# IWF node configuration (example / Helm-rendered base).
+# No secrets here: TLS material is a mounted Kubernetes Secret; OAuth
+# credentials and the admin JWT secret arrive via environment injection.
+diameter:
+  listen: "0.0.0.0:3868"
+  origin_host: "iwf-0.epc.example.org"   # overridden per pod via Helm
+  origin_realm: "epc.example.org"
+  watchdog_interval_s: 30
+  transaction_timeout_ms: 5000
+  max_in_flight: 50000
+
+sba:
+  nrf_uri: "http://nrf.5gc.svc.cluster.local:8080"
+  request_timeout_ms: 1500
+  discovery_ttl_s: 300
+  # token_endpoint: defaults to <nrf_uri>/oauth2/token
+
+admin:
+  listen: "0.0.0.0:8080"
+  metrics_listen: "0.0.0.0:9090"
+  jwt_rs256_public_key: "/etc/iwf/admin-jwt/public.pem"
+  jwt_audience: "iwf-admin"
+
+rules_file: "/etc/iwf/rules.yaml"
+
+# tls:                       # enable for direct (non-mesh) mTLS
+#   cert: /etc/iwf/tls/tls.crt
+#   key: /etc/iwf/tls/tls.key
+#   ca: /etc/iwf/tls/ca.crt
+
+drain_timeout_s: 30

@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iwf-config
+  namespace: ims-interworking
+data:
+  config.yaml: |
+    diameter:
+      listen: "0.0.0.0:3868"
+      origin_host: "iwf.epc.example.org"
+      origin_realm: "epc.example.org"
+      watchdog_interval_s: 30
+      transaction_timeout_ms: 5000
+      max_in_flight: 50000
+    sba:
+      nrf_uri: "http://nrf.5gc.svc.cluster.local:8080"
+      request_timeout_ms: 1500
+      discovery_ttl_s: 300
+    admin:
+      listen: "0.0.0.0:8080"
+      metrics_listen: "0.0.0.0:9090"
+      jwt_rs256_public_key: "/etc/iwf/admin-jwt/public.pem"
+      jwt_audience: "iwf-admin"
+    rules_file: "/etc/iwf/rules.yaml"
+    drain_timeout_s: 30
+  rules.yaml: |
+    # Operator ruleset; see config/rules.yaml in the repo for the
+    # fully-commented default covering UAR/SAR/LIR/MAR/RTR/UDR/PUR.
+    rules: []

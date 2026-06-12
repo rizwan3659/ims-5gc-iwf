@@ -1,0 +1,31 @@
+[package]
+name = "iwf-node"
+description = "IWF composition root binary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+iwf-core = { workspace = true }
+iwf-diameter = { workspace = true }
+iwf-sba = { workspace = true }
+iwf-translation = { workspace = true }
+iwf-discovery = { workspace = true }
+iwf-security = { workspace = true }
+iwf-observability = { workspace = true }
+iwf-admin = { workspace = true }
+iwf-config = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+iwf-benchmark = { path = "../iwf-benchmark" }
+axum = { workspace = true }

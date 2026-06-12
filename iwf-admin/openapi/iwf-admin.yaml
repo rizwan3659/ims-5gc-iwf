@@ -1,0 +1,101 @@
+openapi: 3.0.3
+info:
+  title: IWF Management API
+  description: >
+    Management surface of the IMS/5GC Interworking Function. All /admin
+    routes require a Bearer JWT whose scope maps to an RBAC role:
+    iwf:operator (full control), iwf:provisioning (rules), iwf:read.
+  version: 0.1.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200": { description: Process is alive }
+  /readyz:
+    get:
+      summary: Readiness probe
+      description: >
+        200 only when NRF registration has succeeded, at least one Diameter
+        peer is OPEN, and the node is not draining.
+      security: []
+      responses:
+        "200": { description: Ready for traffic }
+        "503": { description: Not ready }
+  /admin/v1/log-level:
+    put:
+      summary: Switch the active log level at runtime
+      description: Requires the operator role.
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              enum: [trace, debug, info, warn, error, "off"]
+      responses:
+        "204": { description: Level applied }
+        "400": { description: Unknown level }
+        "401": { description: Missing/invalid token }
+        "403": { description: Role lacks operate permission }
+  /admin/v1/rules:
+    get:
+      summary: Summarize the active translation rules
+      description: Requires any role.
+      responses:
+        "200":
+          description: Active rule summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rules:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        version: { type: string }
+                        rollout_percent: { type: integer }
+                        trigger:
+                          type: object
+                          properties:
+                            diameter_application: { type: integer }
+                            command_code: { type: integer }
+        "401": { description: Missing/invalid token }
+        "403": { description: Insufficient role }
+    put:
+      summary: Validate and atomically activate a new rule document
+      description: >
+        Requires the provisioning or operator role. The document is fully
+        validated before activation; on any error the previous rules remain
+        active and 422 is returned.
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema: { type: string }
+      responses:
+        "200":
+          description: Rules activated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  activated_rules: { type: integer }
+        "401": { description: Missing/invalid token }
+        "403": { description: Insufficient role }
+        "422": { description: Document rejected; previous rules still active }
+components:
+  securitySchemes:
+    bearerJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+security:
+  - bearerJwt: []

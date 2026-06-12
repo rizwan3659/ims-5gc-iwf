@@ -1,0 +1,25 @@
+[package]
+name = "iwf-admin"
+description = "Management REST API (Axum)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+iwf-core = { workspace = true }
+iwf-config = { workspace = true }
+iwf-observability = { workspace = true }
+iwf-security = { workspace = true }
+iwf-translation = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }

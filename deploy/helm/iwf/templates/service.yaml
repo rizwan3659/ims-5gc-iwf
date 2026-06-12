@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "iwf.fullname" . }}
+  labels: {{- include "iwf.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "iwf.fullname" . }}
+  ports:
+    - { name: diameter, port: 3868, targetPort: diameter }
+    - { name: admin, port: 8080, targetPort: admin }
+    - { name: metrics, port: 9090, targetPort: metrics }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "iwf.fullname" . }}-peers
+  labels: {{- include "iwf.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    app: {{ include "iwf.fullname" . }}
+  ports:
+    - { name: diameter, port: 3868, targetPort: diameter }

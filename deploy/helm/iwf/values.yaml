@@ -1,0 +1,72 @@
+# -- Number of IWF pods before HPA takes over.
+# Sizing basis: one 4-core pod sustains >=25k TPS (see docs/hld.md §4).
+replicaCount: 6
+
+image:
+  repository: registry.example.org/ims/iwf
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# -- CPU/memory; requests==limits gives Guaranteed QoS so the tokio worker
+# count and latency SLO stay stable under node pressure.
+resources:
+  requests: { cpu: "4", memory: 2Gi }
+  limits: { cpu: "4", memory: 2Gi }
+
+diameter:
+  # -- DiameterIdentity advertised in CER/CEA. Must resolve to this service
+  # for IMS peers.
+  originHost: iwf.epc.example.org
+  originRealm: epc.example.org
+  watchdogIntervalS: 30
+  transactionTimeoutMs: 5000
+  # -- Ingress shed threshold (DIAMETER_TOO_BUSY past this many in-flight).
+  maxInFlight: 50000
+
+sba:
+  # -- NRF base URI (Nnrf_NFManagement + Nnrf_NFDiscovery).
+  nrfUri: http://nrf.5gc.svc.cluster.local:8080
+  requestTimeoutMs: 1500
+  discoveryTtlS: 300
+
+# -- Diameter peers (documentation of expected peers; peers connect inbound).
+peers: []
+#  - host: hss-1.ims.example.org
+#    realm: ims.example.org
+
+tls:
+  # -- Secret of type kubernetes.io/tls (+ ca.crt) mounted at /etc/iwf/tls.
+  # Rotation: update the Secret; the node reloads without restart.
+  secretName: iwf-tls
+
+oauth:
+  # -- Secret with client-id / client-secret keys for Nnrf_AccessToken.
+  secretName: iwf-oauth
+
+adminJwt:
+  # -- Secret with public.pem (RS256) for admin-API JWT validation.
+  secretName: iwf-admin-jwt
+  audience: iwf-admin
+
+# -- Inline translation rules (rendered into the ConfigMap). Replace with
+# your operator ruleset; see repo config/rules.yaml for the full default.
+rules: |
+  rules: []
+
+drainTimeoutS: 30
+logLevel: info
+
+hpa:
+  enabled: true
+  minReplicas: 4
+  maxReplicas: 24
+  # -- Average per-pod Diameter TPS before scale-out.
+  targetTpsPerPod: 20000
+
+pdb:
+  minAvailable: 2
+
+networkPolicy:
+  enabled: true
+  # -- Namespace label selecting the IMS signaling network for port 3868.
+  imsZoneLabel: { network.example.org/zone: ims-signaling }
