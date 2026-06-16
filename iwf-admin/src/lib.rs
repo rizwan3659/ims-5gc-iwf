@@ -12,6 +12,7 @@
 //! | `/admin/v1/log-level` | PUT | `operate` |
 //! | `/admin/v1/rules` | GET | `read` |
 //! | `/admin/v1/rules` | PUT | `provision` |
+//! | `/admin/v1/dictionary` | PUT | `provision` |
 //!
 //! Authentication: `Authorization: Bearer <JWT>`; the JWT must pass
 //! signature/expiry/audience validation and carry a scope mapping to a
@@ -33,6 +34,7 @@ use iwf_observability::{LogHandle, Metrics};
 use iwf_security::jwt::JwtValidator;
 use iwf_security::rbac::{allows, role_from_scopes, Permission};
 use iwf_translation::rule::RuleStore;
+use iwf_translation::{AvpCatalog, CatalogStore};
 
 /// Readiness inputs aggregated from the rest of the node.
 #[derive(Debug, Default)]
@@ -62,6 +64,9 @@ pub struct AdminState {
     pub log: Option<LogHandle>,
     /// Active translation rules.
     pub rules: Arc<RuleStore>,
+    /// Active AVP dictionary (shared with the engine + rule validation), so a
+    /// `PUT /admin/v1/dictionary` swap is seen everywhere.
+    pub catalog: Arc<CatalogStore>,
     /// Metric registry.
     pub metrics: Metrics,
     /// Readiness aggregation.
@@ -163,6 +168,29 @@ async fn put_rules(
     }
 }
 
+/// Hot-swap the AVP dictionary. The new document must parse *and* the
+/// currently-active rules must still validate against it (no orphaned AVP
+/// names), otherwise the swap is rejected and the old dictionary stays active.
+/// Replaces the whole catalog (PUT semantics), like `PUT /admin/v1/rules`.
+async fn put_dictionary(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<impl IntoResponse, StatusCode> {
+    authorize(&state, &headers, Permission::Provision)?;
+    let new = AvpCatalog::from_yaml(&body).map_err(|e| {
+        tracing::warn!(error = %e, "dictionary reload: parse rejected");
+        StatusCode::UNPROCESSABLE_ENTITY
+    })?;
+    if let Err(e) = state.rules.load().validate(&new) {
+        tracing::warn!(error = %e, "dictionary reload: active rules no longer valid");
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    let count = new.len();
+    state.catalog.store(new);
+    Ok(axum::Json(serde_json::json!({ "activated_avps": count })))
+}
+
 /// Admin API router (health + admin routes).
 pub fn admin_router(state: AdminState) -> Router {
     Router::new()
@@ -170,6 +198,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/readyz", get(readyz))
         .route("/admin/v1/log-level", put(put_log_level))
         .route("/admin/v1/rules", get(get_rules).put(put_rules))
+        .route("/admin/v1/dictionary", put(put_dictionary))
         .with_state(state)
 }
 
@@ -242,11 +271,14 @@ rules:
 "#;
 
     fn state() -> AdminState {
+        let rules = Arc::new(RuleStore::new(
+            iwf_translation::rule::RuleSet::from_yaml(RULES).expect("rules"),
+        ));
+        let catalog = rules.catalog(); // share the builtin catalog with admin
         AdminState {
             log: None,
-            rules: Arc::new(RuleStore::new(
-                iwf_translation::rule::RuleSet::from_yaml(RULES).expect("rules"),
-            )),
+            rules,
+            catalog,
             metrics: Metrics::new().expect("metrics"),
             readiness: Arc::new(Readiness::default()),
             jwt: Arc::new(JwtValidator::hs256(b"admin-test-secret", "iwf-admin")),
@@ -358,6 +390,93 @@ rules:
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(s.rules.load().rules[0].id, "r2", "previous rules intact");
+    }
+
+    #[tokio::test]
+    async fn dictionary_reload_adds_avp_and_protects_active_rules() {
+        let s = state();
+        let auth = format!("Bearer {}", token("iwf:provisioning"));
+        let custom_rule = r#"
+rules:
+  - id: r1
+    trigger: { diameter_application: 16777216, command_code: 300 }
+    actions:
+      - extract: { avp: "Foo-Thing", as: x }
+      - map_response: { default: build_success }
+    version: v1
+"#;
+        // Foo-Thing is unknown to the builtin catalog → rule reload rejected.
+        let (status, _) = call(
+            admin_router(s.clone()),
+            Request::put("/admin/v1/rules")
+                .header("authorization", &auth)
+                .body(Body::from(custom_rule))
+                .expect("req"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // PUT a dictionary defining Foo-Thing.
+        let dictionary = r#"
+interfaces:
+  custom:
+    avps:
+      - { name: Foo-Thing, code: 9000, vendor: 4242, type: UTF8String }
+"#;
+        let (status, body) = call(
+            admin_router(s.clone()),
+            Request::put("/admin/v1/dictionary")
+                .header("authorization", &auth)
+                .body(Body::from(dictionary))
+                .expect("req"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("activated_avps"), "got {body}");
+
+        // …now the same rule validates against the hot-swapped dictionary.
+        let (status, _) = call(
+            admin_router(s.clone()),
+            Request::put("/admin/v1/rules")
+                .header("authorization", &auth)
+                .body(Body::from(custom_rule))
+                .expect("req"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // A dictionary that would orphan the now-active rule's AVP is rejected.
+        let drops_foo = r#"
+interfaces:
+  custom:
+    avps:
+      - { name: Other-Thing, code: 9001, vendor: 4242, type: UTF8String }
+"#;
+        let (status, _) = call(
+            admin_router(s.clone()),
+            Request::put("/admin/v1/dictionary")
+                .header("authorization", &auth)
+                .body(Body::from(drops_foo))
+                .expect("req"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        // Old dictionary intact: Foo-Thing still resolves.
+        assert!(s.catalog.load().get("Foo-Thing").is_some());
+    }
+
+    #[tokio::test]
+    async fn dictionary_reload_requires_provisioning() {
+        let s = state();
+        let (status, _) = call(
+            admin_router(s),
+            Request::put("/admin/v1/dictionary")
+                .header("authorization", format!("Bearer {}", token("iwf:read")))
+                .body(Body::from("interfaces: {}"))
+                .expect("req"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

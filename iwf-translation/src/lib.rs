@@ -25,7 +25,7 @@ pub mod mapping;
 pub mod plugin;
 pub mod rule;
 
-pub use catalog::{AvpCatalog, AvpDef, AvpKind};
+pub use catalog::{AvpCatalog, AvpDef, AvpKind, CatalogStore};
 pub use engine::TranslationEngine;
 pub use plugin::{PluginRegistry, TranslationPlugin};
 pub use rule::{

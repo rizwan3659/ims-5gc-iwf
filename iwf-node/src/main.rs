@@ -130,31 +130,39 @@ async fn run() {
     };
 
     // ---- AVP dictionary (per-interface catalog; builtin when unset) -------
+    // `dictionary_file` may be a single file or a directory of `*.yaml` files
+    // merged into one catalog. Hot-swappable via PUT /admin/v1/dictionary.
     let catalog = match &config.dictionary_file {
         Some(path) => {
-            let text = match std::fs::read_to_string(path) {
-                Ok(t) => t,
-                Err(e) => fatal("reading dictionary file", e),
+            let docs = match read_config_documents(path) {
+                Ok(d) => d,
+                Err(e) => fatal("reading dictionary file(s)", e),
             };
-            match iwf_translation::AvpCatalog::from_yaml(&text) {
+            match iwf_translation::AvpCatalog::from_yaml_documents(docs.iter().map(String::as_str))
+            {
                 Ok(c) => {
-                    tracing::info!(path = %path.display(), avps = c.len(), "AVP dictionary loaded");
-                    Arc::new(c)
+                    tracing::info!(path = %path.display(), files = docs.len(), avps = c.len(), "AVP dictionary loaded");
+                    c
                 }
-                Err(e) => fatal("parsing dictionary file", e),
+                Err(e) => fatal("parsing dictionary file(s)", e),
             }
         }
-        None => Arc::new(iwf_translation::AvpCatalog::builtin()),
+        None => iwf_translation::AvpCatalog::builtin(),
     };
+    let catalog = Arc::new(iwf_translation::CatalogStore::new(catalog));
 
     // ---- translation rules (hot-reload via admin PUT /admin/v1/rules) ----
-    let rules_text = match std::fs::read_to_string(&config.rules_file) {
-        Ok(t) => t,
-        Err(e) => fatal("reading rules file", e),
+    // `rules_file` may likewise be a single file or a directory of `*.yaml`.
+    let rules_docs = match read_config_documents(&config.rules_file) {
+        Ok(d) => d,
+        Err(e) => fatal("reading rules file(s)", e),
     };
-    let rules = match iwf_translation::rule::RuleSet::from_yaml_with(&rules_text, &catalog) {
-        Ok(set) => Arc::new(RuleStore::with_catalog(set, catalog.clone())),
-        Err(e) => fatal("parsing rules file", e),
+    let rules = match iwf_translation::rule::RuleSet::from_yaml_documents_with(
+        rules_docs.iter().map(String::as_str),
+        &catalog.load(),
+    ) {
+        Ok(set) => Arc::new(RuleStore::with_catalog_store(set, catalog.clone())),
+        Err(e) => fatal("parsing rules file(s)", e),
     };
 
     // ---- 5GC side ---------------------------------------------------------
@@ -224,7 +232,7 @@ async fn run() {
         config.diameter.origin_host.clone(),
         config.diameter.origin_realm.clone(),
     )
-    .with_catalog(catalog);
+    .with_catalog_store(catalog.clone());
     if let (Some(b), Some(nc)) = (&bindings, &config.notification) {
         engine = engine
             .with_bindings(b.clone())
@@ -266,6 +274,7 @@ async fn run() {
     let admin_state = AdminState {
         log,
         rules: rules.clone(),
+        catalog: catalog.clone(),
         metrics: metrics.clone(),
         readiness: readiness.clone(),
         jwt,
@@ -322,6 +331,29 @@ fn instance_id() -> String {
     // Stable for the pod lifetime; the NRF treats PUT as upsert, so a new id
     // after restart is also fine (the old one ages out via heartbeat).
     std::env::var("IWF_NF_INSTANCE_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
+}
+
+/// Read a config path as YAML document text(s): a single file → one document;
+/// a directory → every `*.yaml`/`*.yml` in it, sorted by name for a
+/// deterministic merge order. Lets a dictionary/rules pack be split one file
+/// per interface (`dictionary.d/cx.yaml`, `.../rx.yaml`, …).
+fn read_config_documents(path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    if path.is_dir() {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(path)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                matches!(
+                    p.extension().and_then(|x| x.to_str()),
+                    Some("yaml") | Some("yml")
+                )
+            })
+            .collect();
+        files.sort();
+        files.iter().map(std::fs::read_to_string).collect()
+    } else {
+        Ok(vec![std::fs::read_to_string(path)?])
+    }
 }
 
 fn admin_jwt(config: &iwf_config::Config) -> Result<JwtValidator, String> {

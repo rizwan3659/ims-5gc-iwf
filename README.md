@@ -78,5 +78,5 @@ Load test: `cargo run --release -p iwf-benchmark --bin loadgen -- host:3868
 8. ~~**PCF flows**~~ / **CHF flows** — **done (Phase 2):** Rx (AAR/STR →
    `Npcf_PolicyAuthorization`) and Ro (CCR → `Nchf_ConvergedCharging`) ship as
    declarative rule packs in `config/rules-nhss.yaml`; `NfType::Chf` added.
-   Full-node e2e for Rx/Ro (multi-NF NRF discovery mock) is a follow-up;
-   translation is covered by engine tests.
+   Driven full-node over real Diameter against a multi-NF discovery mock
+   (`all_interfaces_end_to_end`).
