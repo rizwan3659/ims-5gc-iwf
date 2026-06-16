@@ -62,7 +62,7 @@ use iwf_core::nf::NfType;
 use iwf_core::ports::SbiMethod;
 use serde::Deserialize;
 
-use crate::catalog::{AvpCatalog, AvpKind};
+use crate::catalog::{AvpCatalog, AvpKind, CatalogStore};
 
 /// Trigger: which Diameter requests a rule applies to.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -647,10 +647,30 @@ impl RuleSet {
 
     /// Parse a YAML document, validating against `catalog`.
     pub fn from_yaml_with(text: &str, catalog: &AvpCatalog) -> Result<RuleSet, CoreError> {
-        let set: RuleSet = serde_yaml::from_str(text)
-            .map_err(|e| CoreError::Adapter(format!("rule YAML parse: {e}")))?;
-        set.validate(catalog)?;
-        Ok(set)
+        RuleSet::from_yaml_documents_with([text], catalog)
+    }
+
+    /// Parse and **merge** several rule documents (a directory of `*.yaml`
+    /// files) into one set, then validate the whole. `rules` and
+    /// `notifications` concatenate in document order; validation enforces
+    /// globally-unique ids across all files, so an interface-per-file layout
+    /// composes safely.
+    pub fn from_yaml_documents_with<'a, I>(
+        docs: I,
+        catalog: &AvpCatalog,
+    ) -> Result<RuleSet, CoreError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut merged = RuleSet::default();
+        for text in docs {
+            let set: RuleSet = serde_yaml::from_str(text)
+                .map_err(|e| CoreError::Adapter(format!("rule YAML parse: {e}")))?;
+            merged.rules.extend(set.rules);
+            merged.notifications.extend(set.notifications);
+        }
+        merged.validate(catalog)?;
+        Ok(merged)
     }
 
     /// Parse a TOML document with the same schema (builtin catalog).
@@ -843,28 +863,43 @@ fn validate_avp_specs(
 }
 
 /// Hot-swappable rule holder. Readers pay one atomic load per transaction;
-/// writers (admin API / file watcher) validate — against the catalog the
-/// store was built with — then swap atomically, so a bad document can never
-/// become active.
+/// writers (admin API / file watcher) validate — against the *current*
+/// dictionary in the shared [`CatalogStore`] — then swap atomically, so a bad
+/// document can never become active.
 #[derive(Debug, Default)]
 pub struct RuleStore {
     current: ArcSwap<RuleSet>,
-    catalog: Arc<AvpCatalog>,
+    catalog: Arc<CatalogStore>,
 }
 
 impl RuleStore {
     /// Store seeded with `initial`, validating reloads against the builtin
     /// catalog.
     pub fn new(initial: RuleSet) -> Self {
-        RuleStore::with_catalog(initial, Arc::new(AvpCatalog::builtin()))
+        RuleStore::with_catalog_store(initial, Arc::new(CatalogStore::default()))
     }
 
-    /// Store seeded with `initial`, validating reloads against `catalog`.
+    /// Store seeded with `initial`, validating reloads against a private
+    /// snapshot of `catalog` (not hot-reloadable; convenient for tests).
     pub fn with_catalog(initial: RuleSet, catalog: Arc<AvpCatalog>) -> Self {
+        RuleStore::with_catalog_store(
+            initial,
+            Arc::new(CatalogStore::new(catalog.as_ref().clone())),
+        )
+    }
+
+    /// Store seeded with `initial`, sharing `catalog` with the engine and the
+    /// admin dictionary-reload endpoint so a dictionary swap is seen here too.
+    pub fn with_catalog_store(initial: RuleSet, catalog: Arc<CatalogStore>) -> Self {
         RuleStore {
             current: ArcSwap::from_pointee(initial),
             catalog,
         }
+    }
+
+    /// The shared catalog holder (so the engine and admin API can share it).
+    pub fn catalog(&self) -> Arc<CatalogStore> {
+        self.catalog.clone()
     }
 
     /// Current snapshot (cheap; clone of an `Arc`).
@@ -872,10 +907,10 @@ impl RuleStore {
         self.current.load_full()
     }
 
-    /// Validate and atomically activate a new YAML document. On error the
-    /// previous rules stay active.
+    /// Validate and atomically activate a new YAML document (or directory of
+    /// documents). On error the previous rules stay active.
     pub fn reload_yaml(&self, text: &str) -> Result<usize, CoreError> {
-        let set = RuleSet::from_yaml_with(text, &self.catalog)?;
+        let set = RuleSet::from_yaml_with(text, &self.catalog.load())?;
         let n = set.rules.len();
         self.current.store(Arc::new(set));
         Ok(n)
@@ -1075,6 +1110,38 @@ rules:
         // Reloads validate against the store's catalog, not the builtin.
         let store = RuleStore::with_catalog(RuleSet::default(), Arc::new(catalog));
         assert_eq!(store.reload_yaml(doc).expect("reload"), 1);
+    }
+
+    #[test]
+    fn merges_multiple_rule_documents() {
+        // One file per interface, merged into a single validated set.
+        let cx = r#"
+rules:
+  - id: cx_rule
+    trigger: { diameter_application: 16777216, command_code: 300 }
+    actions:
+      - map_response: { default: build_success }
+    version: v1
+"#;
+        let sh = r#"
+rules:
+  - id: sh_rule
+    trigger: { diameter_application: 16777217, command_code: 306 }
+    actions:
+      - map_response: { default: build_success }
+    version: v1
+notifications:
+  - id: sh_pnr
+    bind_kind: sh
+    emit: { command: 309, application: 16777217, avps: [ { avp: User-Name, value: "{identity}" } ] }
+"#;
+        let set =
+            RuleSet::from_yaml_documents_with([cx, sh], &AvpCatalog::builtin()).expect("merge");
+        assert_eq!(set.rules.len(), 2);
+        assert_eq!(set.notifications.len(), 1);
+
+        // A duplicate id *across* files is caught by whole-set validation.
+        assert!(RuleSet::from_yaml_documents_with([cx, cx], &AvpCatalog::builtin()).is_err());
     }
 
     #[test]

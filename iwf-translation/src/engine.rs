@@ -14,7 +14,7 @@ use iwf_diameter::message::{Message, MessageBuilder};
 use iwf_diameter::avp::{avp, avp_vendor, Avp, AvpValue};
 use iwf_diameter::dictionary as dict;
 
-use crate::catalog::{AvpCatalog, AvpKind};
+use crate::catalog::{AvpCatalog, AvpKind, CatalogStore};
 use crate::plugin::{experimental_result, PluginRegistry, TranslationContext};
 use crate::rule::{
     Action, AnswerBuild, AnswerSpec, AvpSource, AvpSpec, ConcatPart, Decode, Guard,
@@ -26,7 +26,7 @@ use crate::rule::{
 pub struct TranslationEngine {
     rules: Arc<RuleStore>,
     plugins: PluginRegistry,
-    catalog: Arc<AvpCatalog>,
+    catalog: Arc<CatalogStore>,
     sba: Arc<dyn SbaPort>,
     origin_host: String,
     origin_realm: String,
@@ -61,7 +61,7 @@ impl TranslationEngine {
         TranslationEngine {
             rules,
             plugins,
-            catalog: Arc::new(AvpCatalog::builtin()),
+            catalog: Arc::new(CatalogStore::default()),
             sba,
             origin_host: origin_host.into(),
             origin_realm: origin_realm.into(),
@@ -71,9 +71,16 @@ impl TranslationEngine {
         }
     }
 
-    /// Replace the builtin AVP catalog with a dictionary-loaded one (pass
-    /// the same `Arc` the [`RuleStore`] validates against).
+    /// Use a fixed dictionary-loaded catalog (a private, non-hot-reloadable
+    /// snapshot; convenient for tests and static deployments).
     pub fn with_catalog(mut self, catalog: Arc<AvpCatalog>) -> Self {
+        self.catalog = Arc::new(CatalogStore::new(catalog.as_ref().clone()));
+        self
+    }
+
+    /// Share the [`CatalogStore`] with the [`RuleStore`] and the admin
+    /// dictionary-reload endpoint, so a hot dictionary swap is seen here too.
+    pub fn with_catalog_store(mut self, catalog: Arc<CatalogStore>) -> Self {
         self.catalog = catalog;
         self
     }
@@ -129,6 +136,10 @@ impl TranslationEngine {
         request: &Message,
         correlation_id: &str,
     ) -> Result<Message, CoreError> {
+        // One catalog snapshot for the whole transaction (a concurrent
+        // dictionary hot-swap takes effect on the next request).
+        let catalog = self.catalog.load();
+
         let mut ctx = TranslationContext {
             request: request.clone(),
             vars: BTreeMap::new(),
@@ -152,8 +163,7 @@ impl TranslationEngine {
             match action {
                 Action::Extract { avp, var, required } => {
                     // Name validity is guaranteed by RuleSet::validate.
-                    let def = self
-                        .catalog
+                    let def = catalog
                         .get(avp)
                         .ok_or(CoreError::MissingElement("known AVP name"))?;
                     match request.find(def.code, def.vendor) {
@@ -361,7 +371,9 @@ impl TranslationEngine {
                             })?;
                             plugin.build_answer(&ctx)
                         }
-                        AnswerSpec::Build(build) => self.build_inline(&rule.id, build, &ctx),
+                        AnswerSpec::Build(build) => {
+                            self.build_inline(&rule.id, build, &ctx, &catalog)
+                        }
                     };
                 }
             }
@@ -383,6 +395,7 @@ impl TranslationEngine {
         rule_id: &str,
         build: &AnswerBuild,
         ctx: &TranslationContext,
+        catalog: &AvpCatalog,
     ) -> Result<Message, CoreError> {
         let mut b = ctx.answer();
         if let Some(rc) = build.result_code {
@@ -393,7 +406,7 @@ impl TranslationEngine {
         }
         let json = ctx.response_json();
         for spec in &build.avps {
-            if let Some(rendered) = self.render_avp(rule_id, spec, ctx, json.as_ref())? {
+            if let Some(rendered) = self.render_avp(rule_id, spec, ctx, json.as_ref(), catalog)? {
                 b = b.avp(rendered);
             }
         }
@@ -409,9 +422,10 @@ impl TranslationEngine {
         spec: &AvpSpec,
         ctx: &TranslationContext,
         json: Option<&serde_json::Value>,
+        catalog: &AvpCatalog,
     ) -> Result<Option<Avp>, CoreError> {
         // Name validity is guaranteed by RuleSet::validate; defend anyway.
-        let def = self.catalog.get(&spec.avp).ok_or_else(|| {
+        let def = catalog.get(&spec.avp).ok_or_else(|| {
             CoreError::UnableToComply(format!("rule {rule_id}: unknown AVP {}", spec.avp))
         })?;
         let err =
@@ -435,7 +449,7 @@ impl TranslationEngine {
             AvpSource::Group(children) => {
                 let mut members = Vec::with_capacity(children.len());
                 for child in children {
-                    if let Some(m) = self.render_avp(rule_id, child, ctx, json)? {
+                    if let Some(m) = self.render_avp(rule_id, child, ctx, json, catalog)? {
                         members.push(m);
                     }
                 }
@@ -481,6 +495,7 @@ impl TranslationEngine {
         if let Some(s) = &binding.session_id {
             vars.insert("session_id".to_owned(), s.clone());
         }
+        let catalog = self.catalog.load();
         let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
         // Synthetic context: `render_avp` reads only vars + response (FromBody)
         // + the json arg, never `request` or `answer()`.
@@ -516,7 +531,9 @@ impl TranslationEngine {
                 AvpValue::Utf8(binding.peer_realm.clone()),
             );
         for spec in &rule.emit.avps {
-            if let Some(rendered) = self.render_avp(&rule.id, spec, &ctx, json.as_ref())? {
+            if let Some(rendered) =
+                self.render_avp(&rule.id, spec, &ctx, json.as_ref(), &catalog)?
+            {
                 b = b.avp(rendered);
             }
         }

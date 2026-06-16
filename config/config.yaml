@@ -21,11 +21,16 @@ admin:
   jwt_rs256_public_key: "/etc/iwf/admin-jwt/public.pem"
   jwt_audience: "iwf-admin"
 
-rules_file: "/etc/iwf/rules.yaml"
+# Translation rules. May be a single file OR a directory of *.yaml files
+# (merged in name order; ids must be globally unique). Hot-reload the active
+# set with PUT /admin/v1/rules.
+rules_file: "/etc/iwf/rules.yaml"        # or a directory: /etc/iwf/rules.d
 
 # AVP dictionary (per-interface name → code/vendor/type catalog used by the
-# rule DSL; see config/dictionary.yaml). Unset → builtin Cx/Sh table.
-# dictionary_file: "/etc/iwf/dictionary.yaml"
+# rule DSL; see config/dictionary.yaml). Unset → builtin Cx/Sh table. May also
+# be a single file or a directory of *.yaml. Hot-reload with
+# PUT /admin/v1/dictionary (rejected if it would orphan an active rule's AVP).
+# dictionary_file: "/etc/iwf/dictionary.yaml"   # or a directory: /etc/iwf/dictionary.d
 
 # notification:              # inbound 5GC callback server (Phase 2 server-push:
 #   listen: "0.0.0.0:8081"   # Sh PNR, Cx RTR/PPR, Rx RAR/ASR). Unset = disabled.

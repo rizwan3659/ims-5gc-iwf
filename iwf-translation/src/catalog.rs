@@ -28,7 +28,9 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use iwf_core::error::CoreError;
 use iwf_diameter::dictionary as dict;
 use serde::Deserialize;
@@ -215,30 +217,43 @@ impl AvpCatalog {
         AvpCatalog { by_name }
     }
 
-    /// Parse and merge a YAML dictionary document. Conflicting redefinitions
-    /// of the same name fail the load, so a bad dictionary can never
-    /// silently re-route an AVP.
+    /// Parse and merge a single YAML dictionary document. Conflicting
+    /// redefinitions of the same name fail the load, so a bad dictionary can
+    /// never silently re-route an AVP.
     pub fn from_yaml(text: &str) -> Result<Self, CoreError> {
-        let doc: DictionaryDoc = serde_yaml::from_str(text)
-            .map_err(|e| CoreError::Adapter(format!("dictionary YAML parse: {e}")))?;
+        AvpCatalog::from_yaml_documents([text])
+    }
+
+    /// Parse and merge **several** dictionary documents into one catalog
+    /// (a directory of `*.yaml` files, say). Sections merge across documents
+    /// exactly as they do within one; a name may repeat only with an identical
+    /// definition, so split-by-interface files compose without surprises.
+    pub fn from_yaml_documents<'a, I>(docs: I) -> Result<Self, CoreError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
         let mut by_name: HashMap<String, AvpDef> = HashMap::new();
-        for (interface, section) in &doc.interfaces {
-            for entry in &section.avps {
-                let def = AvpDef {
-                    code: entry.code,
-                    vendor: entry.vendor,
-                    kind: entry.kind,
-                };
-                if let Some(existing) = by_name.get(&entry.name) {
-                    if *existing != def {
-                        return Err(CoreError::Adapter(format!(
-                            "dictionary: {} redefined with a different definition in interface {interface}",
-                            entry.name
-                        )));
+        for text in docs {
+            let doc: DictionaryDoc = serde_yaml::from_str(text)
+                .map_err(|e| CoreError::Adapter(format!("dictionary YAML parse: {e}")))?;
+            for (interface, section) in &doc.interfaces {
+                for entry in &section.avps {
+                    let def = AvpDef {
+                        code: entry.code,
+                        vendor: entry.vendor,
+                        kind: entry.kind,
+                    };
+                    if let Some(existing) = by_name.get(&entry.name) {
+                        if *existing != def {
+                            return Err(CoreError::Adapter(format!(
+                                "dictionary: {} redefined with a different definition in interface {interface}",
+                                entry.name
+                            )));
+                        }
+                        continue;
                     }
-                    continue;
+                    by_name.insert(entry.name.clone(), def);
                 }
-                by_name.insert(entry.name.clone(), def);
             }
         }
         if by_name.is_empty() {
@@ -260,6 +275,43 @@ impl AvpCatalog {
     /// Whether the catalog is empty (never true for loaded catalogs).
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
+    }
+}
+
+/// Hot-swappable holder for the active [`AvpCatalog`], shared by the engine
+/// (AVP extract/encode) and the [`crate::rule::RuleStore`] (rule validation).
+///
+/// Readers pay one atomic load; the admin API swaps a new dictionary in
+/// atomically after re-validating the active rules against it, so a
+/// dictionary that would orphan a live rule never becomes active. Mirrors the
+/// `RuleStore`/`ArcSwap` pattern.
+#[derive(Debug)]
+pub struct CatalogStore {
+    current: ArcSwap<AvpCatalog>,
+}
+
+impl Default for CatalogStore {
+    fn default() -> Self {
+        CatalogStore::new(AvpCatalog::builtin())
+    }
+}
+
+impl CatalogStore {
+    /// Holder seeded with `initial`.
+    pub fn new(initial: AvpCatalog) -> Self {
+        CatalogStore {
+            current: ArcSwap::from_pointee(initial),
+        }
+    }
+
+    /// Current snapshot (cheap; clone of an `Arc`).
+    pub fn load(&self) -> Arc<AvpCatalog> {
+        self.current.load_full()
+    }
+
+    /// Atomically activate `catalog`.
+    pub fn store(&self, catalog: AvpCatalog) {
+        self.current.store(Arc::new(catalog));
     }
 }
 
@@ -285,6 +337,41 @@ mod tests {
             .get("Server-Assignment-Type")
             .is_some_and(|d| d.kind.is_integer()));
         assert!(c.get("User-Name").is_some_and(|d| !d.kind.is_integer()));
+    }
+
+    #[test]
+    fn merges_multiple_documents() {
+        // Split-by-interface files compose into one catalog.
+        let cx = "interfaces: { cx: { avps: [ { name: Public-Identity, code: 601, vendor: 10415, type: UTF8String } ] } }";
+        let rx = "interfaces: { rx: { avps: [ { name: Framed-IP-Address, code: 8, type: OctetString } ] } }";
+        let c = AvpCatalog::from_yaml_documents([cx, rx]).expect("merge");
+        assert_eq!(c.len(), 2);
+        assert!(c.get("Public-Identity").is_some());
+        assert!(c.get("Framed-IP-Address").is_some());
+
+        // A name shared across files with an identical definition is fine…
+        let dup_ok = "interfaces: { sh: { avps: [ { name: Public-Identity, code: 601, vendor: 10415, type: UTF8String } ] } }";
+        assert!(AvpCatalog::from_yaml_documents([cx, dup_ok]).is_ok());
+        // …but a conflicting redefinition across files is rejected.
+        let conflict = "interfaces: { sh: { avps: [ { name: Public-Identity, code: 999, type: UTF8String } ] } }";
+        assert!(AvpCatalog::from_yaml_documents([cx, conflict]).is_err());
+    }
+
+    #[test]
+    fn catalog_store_hot_swaps() {
+        let store = CatalogStore::new(AvpCatalog::builtin());
+        assert!(store.load().get("User-Name").is_some());
+        store.store(
+            AvpCatalog::from_yaml(
+                "interfaces: { x: { avps: [ { name: Only-This, code: 1, type: UTF8String } ] } }",
+            )
+            .expect("dict"),
+        );
+        assert!(store.load().get("Only-This").is_some());
+        assert!(
+            store.load().get("User-Name").is_none(),
+            "replaced wholesale"
+        );
     }
 
     #[test]

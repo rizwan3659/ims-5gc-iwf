@@ -25,6 +25,14 @@ Two further layers keep interfaces configuration-only:
   giving each AVP its code, vendor and Diameter type. The type drives both
   `extract` (integer AVPs render as decimal strings for `set_var` tables)
   and answer encoding. Without a dictionary the builtin Cx/Sh table applies.
+  Both `dictionary_file` and `rules_file` accept a **directory** of `*.yaml`
+  merged in name order (one file per interface), so an operator drops in a new
+  pack without touching the shipped files. The catalog lives in a shared
+  `CatalogStore` (`ArcSwap`) so it hot-swaps via `PUT /admin/v1/dictionary` —
+  which re-validates the active rules against the new dictionary first and
+  rejects a swap that would orphan a live AVP name. So a new AVP + its
+  translation is a config edit (dictionary entry + rule), no recompile and,
+  for the rule half, no restart.
 - **Inline answer specs**: a `map_response` value is either a plugin name or
   a declarative build — `result_code` / `experimental_result` plus ordered
   AVPs sourced `value` (with `{var}` substitution), `from_json` (RFC 6901
