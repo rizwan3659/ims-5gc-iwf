@@ -63,8 +63,9 @@ pub trait TranslationPlugin: Send + Sync {
 }
 
 /// Grouped `Experimental-Result` carrying a 3GPP experimental code
-/// (TS 29.229 §6.2: Vendor-Id 10415 + Experimental-Result-Code).
-fn experimental_result(code: u32) -> iwf_diameter::avp::Avp {
+/// (TS 29.229 §6.2: Vendor-Id 10415 + Experimental-Result-Code). Shared
+/// with the engine's declarative `map_response` renderer.
+pub(crate) fn experimental_result(code: u32) -> iwf_diameter::avp::Avp {
     avp(
         dict::AVP_EXPERIMENTAL_RESULT,
         AvpValue::Grouped(vec![

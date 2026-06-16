@@ -25,39 +25,9 @@ use iwf_core::identity::{Gpsi, IdentityContext, Impi, Impu, Supi};
 use iwf_diameter::dictionary as dict;
 use iwf_diameter::message::Message;
 
-/// Resolve a DSL AVP name to `(code, vendor_id)`.
-///
-/// Names follow the spec spelling (TS 29.229/29.329 tables); the DSL is
-/// validated against this registry at load time, so a typo in a rule fails
-/// the reload instead of a live transaction.
-pub fn avp_by_name(name: &str) -> Option<(u32, Option<u32>)> {
-    let v3 = Some(dict::VENDOR_3GPP);
-    Some(match name {
-        "User-Name" => (dict::AVP_USER_NAME, None),
-        "Session-Id" => (dict::AVP_SESSION_ID, None),
-        "Origin-Host" => (dict::AVP_ORIGIN_HOST, None),
-        "Origin-Realm" => (dict::AVP_ORIGIN_REALM, None),
-        "Destination-Realm" => (dict::AVP_DESTINATION_REALM, None),
-        "Destination-Host" => (dict::AVP_DESTINATION_HOST, None),
-        "Result-Code" => (dict::AVP_RESULT_CODE, None),
-        "Public-Identity" => (dict::AVP_PUBLIC_IDENTITY, v3),
-        "Server-Name" => (dict::AVP_SERVER_NAME, v3),
-        "User-Data" => (dict::AVP_USER_DATA, v3),
-        "SIP-Number-Auth-Items" => (dict::AVP_SIP_NUMBER_AUTH_ITEMS, v3),
-        "SIP-Authentication-Scheme" => (dict::AVP_SIP_AUTH_SCHEME, v3),
-        "SIP-Authenticate" => (dict::AVP_SIP_AUTHENTICATE, v3),
-        "SIP-Authorization" => (dict::AVP_SIP_AUTHORIZATION, v3),
-        "SIP-Auth-Data-Item" => (dict::AVP_SIP_AUTH_DATA_ITEM, v3),
-        "Server-Assignment-Type" => (dict::AVP_SERVER_ASSIGNMENT_TYPE, v3),
-        "User-Authorization-Type" => (dict::AVP_USER_AUTHORIZATION_TYPE, v3),
-        "Confidentiality-Key" => (dict::AVP_CONFIDENTIALITY_KEY, v3),
-        "Integrity-Key" => (dict::AVP_INTEGRITY_KEY, v3),
-        "Data-Reference" => (dict::AVP_DATA_REFERENCE, v3),
-        "MSISDN" => (dict::AVP_MSISDN, v3),
-        "Subs-Req-Type" => (dict::AVP_SUBS_REQ_TYPE, v3),
-        _ => return None,
-    })
-}
+// AVP name resolution lives in [`crate::catalog::AvpCatalog`]: a runtime
+// dictionary (YAML per interface, or the builtin table) consulted by rule
+// validation and the engine, so new interfaces add AVPs without code.
 
 /// Build an [`IdentityContext`] from a Cx request.
 ///
@@ -147,7 +117,9 @@ pub fn auth_from_av5g_aka(av: &serde_json::Value) -> Result<AuthContext, CoreErr
     Ok(ctx)
 }
 
-fn hex_decode(s: &str) -> Result<Bytes, String> {
+/// Decode a hex string to octets (shared with the engine's declarative
+/// `decode: hex` answer sources).
+pub(crate) fn hex_decode(s: &str) -> Result<Bytes, String> {
     if s.len() % 2 != 0 {
         return Err("odd-length hex".to_owned());
     }
@@ -251,20 +223,5 @@ mod tests {
             impi.as_str(),
             "001011234567890@ims.mnc001.mcc001.3gppnetwork.org"
         );
-    }
-
-    #[test]
-    fn avp_registry_covers_dsl_names() {
-        for name in [
-            "User-Name",
-            "Public-Identity",
-            "Server-Name",
-            "SIP-Auth-Data-Item",
-            "User-Data",
-            "MSISDN",
-        ] {
-            assert!(avp_by_name(name).is_some(), "{name} missing from registry");
-        }
-        assert!(avp_by_name("Not-An-AVP").is_none());
     }
 }
