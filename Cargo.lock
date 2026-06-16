@@ -846,6 +846,7 @@ dependencies = [
  "iwf-security",
  "iwf-translation",
  "serde_json",
+ "thiserror 1.0.56",
  "tokio",
  "tracing",
  "uuid",

@@ -203,6 +203,7 @@ impl AvpCatalog {
             ("Integrity-Key", dict::AVP_INTEGRITY_KEY, v3, OctetString),
             // Sh (TS 29.329 §6.3).
             ("User-Data", dict::AVP_USER_DATA, v3, OctetString),
+            ("User-Identity", dict::AVP_USER_IDENTITY, v3, Grouped),
             ("Data-Reference", dict::AVP_DATA_REFERENCE, v3, Enumerated),
             ("MSISDN", dict::AVP_MSISDN, v3, OctetString),
             ("Subs-Req-Type", dict::AVP_SUBS_REQ_TYPE, v3, Enumerated),

@@ -135,6 +135,19 @@ pub struct AdminConfig {
     pub jwt_audience: String,
 }
 
+/// Inbound 5GC notification callback server (Phase 2 server-push: Sh PNR,
+/// Cx RTR/PPR, Rx RAR/ASR). Optional — unset disables notification flows.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationConfig {
+    /// Listen address for the callback endpoint, e.g. `0.0.0.0:8081`.
+    pub listen: String,
+    /// Base URL advertised to 5GC NFs as the callback (`callbackReference` /
+    /// `notifyUri`), e.g. `http://iwf-notif.epc.svc:8081`. The IWF appends
+    /// `/iwf-notif/v1/{session}`.
+    pub advertised_uri: String,
+}
+
 fn default_audience() -> String {
     "iwf-admin".to_owned()
 }
@@ -155,6 +168,10 @@ pub struct Config {
     /// the builtin Cx/Sh table compiled into `iwf-translation`.
     #[serde(default)]
     pub dictionary_file: Option<PathBuf>,
+    /// Inbound notification callback server (server-push flows). Unset →
+    /// notifications disabled.
+    #[serde(default)]
+    pub notification: Option<NotificationConfig>,
     /// TLS material (optional: plain TCP inside a service mesh).
     #[serde(default)]
     pub tls: Option<TlsConfig>,

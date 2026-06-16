@@ -123,11 +123,122 @@ pub enum Action {
         /// unmapped.
         default: Option<String>,
     },
+    /// Record a [`iwf_core::ports::Binding`] keyed by the request's
+    /// Session-Id, so a later server-push (PNR/RAR/ASR via the
+    /// `notifications:` rules) can route back to this peer, or a teardown
+    /// (`unbind`) can address the 5GC resource. Placed *after* the create
+    /// `http_request` so `resource_*` can read its response.
+    Bind {
+        /// Binding family (`sh`/`rx`/`ro`); also selects the notification rule.
+        kind: String,
+        /// Subscriber identity template (`{var}`), stored for the push request.
+        identity: String,
+        /// JSON pointer into the last response for the 5GC resource handle
+        /// (Npcf appSessionId, Nchf charging ref). Mutually exclusive with
+        /// `resource_value`.
+        resource_json: Option<String>,
+        /// Resource handle as a `{var}` template (alternative to
+        /// `resource_json`).
+        resource_value: Option<String>,
+        /// Run only when this guard holds (e.g. Ro: bind only on
+        /// CC-Request-Type INITIAL). Unset → always.
+        when: Option<Guard>,
+    },
+    /// Load the binding for the request's Session-Id into variables *without*
+    /// removing it (Ro CCR-Update needs the chargingDataRef but the session
+    /// lives on). Placed *before* the `http_request` that uses it.
+    BindLookup {
+        /// Variable to receive the binding's `resource_ref`.
+        resource_as: String,
+        /// Run only when this guard holds. Unset → always.
+        when: Option<Guard>,
+    },
+    /// Remove the binding for the request's Session-Id (session teardown:
+    /// STR, Ro Terminate) and optionally inject its stored `resource_ref`
+    /// into a variable so the teardown `http_request` can address the 5GC
+    /// resource. Placed *before* that `http_request`.
+    Unbind {
+        /// Variable to receive the binding's `resource_ref` (e.g. the
+        /// appSessionId for the delete path). Unset → resource not needed.
+        resource_as: Option<String>,
+        /// Run only when this guard holds (e.g. Ro: unbind only on
+        /// CC-Request-Type TERMINATION). Unset → always.
+        when: Option<Guard>,
+    },
     /// Map the most recent HTTP status to an answer: either a named builder
     /// (a [`crate::plugin::TranslationPlugin`] registered under that name)
     /// or an inline declarative [`AnswerBuild`]. The key `"default"`
     /// handles unlisted statuses.
     MapResponse(BTreeMap<String, AnswerSpec>),
+}
+
+/// A `notifications:` entry — how to turn an inbound 5GC notification into an
+/// **originated** Diameter request (PNR/RTR/PPR/RAR/ASR). Selected by the
+/// triggering [`iwf_core::ports::Binding`]'s `kind`. The `emit.avps` reuse the
+/// same [`AvpSpec`] machinery as answers, so the reverse direction is
+/// configuration too.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationRule {
+    /// Unique id (diagnostics).
+    pub id: String,
+    /// Binding family this rule serves (`sh`/`rx`/`ro`).
+    pub bind_kind: String,
+    /// Optional event discriminator: when several rules share a `bind_kind`
+    /// (e.g. Cx RTR-deregistration vs PPR-profile-update, Rx RAR vs ASR), the
+    /// notification body field selects which one to emit. Absent → matches any
+    /// notification of this kind (use as the fallback, listed last).
+    #[serde(rename = "match", default)]
+    pub matcher: Option<NotificationMatch>,
+    /// The request to emit.
+    pub emit: EmitSpec,
+}
+
+impl NotificationRule {
+    /// Whether this rule applies to a notification with the given parsed body.
+    /// No `match` → always; otherwise the JSON pointer must resolve to a
+    /// string equal to `equals` (event discriminators are JSON strings).
+    pub fn matches(&self, body: Option<&serde_json::Value>) -> bool {
+        match &self.matcher {
+            None => true,
+            Some(m) => body
+                .and_then(|j| j.pointer(&m.json))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == m.equals),
+        }
+    }
+}
+
+/// Notification event matcher: `{ json: "/pointer", equals: "VALUE" }`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationMatch {
+    /// RFC 6901 pointer into the notification body.
+    pub json: String,
+    /// Required value at that pointer (string compare).
+    pub equals: String,
+}
+
+/// The originated request a [`NotificationRule`] builds.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmitSpec {
+    /// Diameter Command-Code (e.g. 309 PNR).
+    pub command: u32,
+    /// Application-Id (e.g. 16777217 Sh).
+    pub application: u32,
+    /// Reuse the bound session's Session-Id instead of generating a fresh one.
+    /// Needed when the originated request belongs to the *same* Diameter
+    /// session as the forward flow (Rx RAR/ASR share the AAR session); left
+    /// false for independent pushes (Sh PNR, Cx RTR/PPR).
+    #[serde(default)]
+    pub reuse_session: bool,
+    /// Payload AVPs. Sources resolve against the binding fields (exposed as
+    /// `{identity}`/`{resource_ref}`/`{session_id}`/`{peer_host}`) and the
+    /// notification body (`from_json`/`from_body`). Session-Id, Origin- and
+    /// Destination-Host/Realm are set automatically by the engine.
+    #[serde(default)]
+    pub avps: Vec<AvpSpec>,
 }
 
 /// One `map_response` value: plugin by name, or a declarative build.
@@ -217,6 +328,19 @@ pub enum PartSource {
 pub enum Decode {
     /// Lower/upper-case hex string → octets (auth vectors per TS 29.509).
     Hex,
+}
+
+/// Conditional guard on a stateful action: the named variable must equal
+/// `equals`. Gives the otherwise-linear action list the minimal branching the
+/// Ro CCR family needs (bind on INITIAL / lookup on UPDATE / unbind on
+/// TERMINATION, all triggered by the same command code).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Guard {
+    /// Variable to test (typically a prior `extract`/`set_var`).
+    pub var: String,
+    /// Required value (string compare).
+    pub equals: String,
 }
 
 /// `extract:` payload.
@@ -350,6 +474,39 @@ impl TryFrom<ConcatPartYaml> for ConcatPart {
     }
 }
 
+/// `bind:` payload.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindSpec {
+    kind: String,
+    identity: String,
+    #[serde(default)]
+    resource_json: Option<String>,
+    #[serde(default)]
+    resource_value: Option<String>,
+    #[serde(default)]
+    when: Option<Guard>,
+}
+
+/// `bind_lookup:` payload.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BindLookupSpec {
+    resource_as: String,
+    #[serde(default)]
+    when: Option<Guard>,
+}
+
+/// `unbind:` payload.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnbindSpec {
+    #[serde(default)]
+    resource_as: Option<String>,
+    #[serde(default)]
+    when: Option<Guard>,
+}
+
 /// Wire shape of one action: a mapping with exactly one recognized key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -361,6 +518,12 @@ struct ActionMap {
     #[serde(default)]
     http_request: Option<HttpRequestSpec>,
     #[serde(default)]
+    bind: Option<BindSpec>,
+    #[serde(default)]
+    bind_lookup: Option<BindLookupSpec>,
+    #[serde(default)]
+    unbind: Option<UnbindSpec>,
+    #[serde(default)]
     map_response: Option<BTreeMap<String, AnswerSpec>>,
 }
 
@@ -371,10 +534,13 @@ impl TryFrom<ActionMap> for Action {
         let keys = usize::from(m.extract.is_some())
             + usize::from(m.set_var.is_some())
             + usize::from(m.http_request.is_some())
+            + usize::from(m.bind.is_some())
+            + usize::from(m.bind_lookup.is_some())
+            + usize::from(m.unbind.is_some())
             + usize::from(m.map_response.is_some());
         if keys != 1 {
             return Err(
-                "each action must have exactly one of extract / set_var / http_request / map_response"
+                "each action must have exactly one of extract / set_var / http_request / bind / bind_lookup / unbind / map_response"
                     .to_owned(),
             );
         }
@@ -400,6 +566,30 @@ impl TryFrom<ActionMap> for Action {
                 path: h.path,
                 query: h.query,
                 body: h.body,
+            });
+        }
+        if let Some(b) = m.bind {
+            if b.resource_json.is_some() && b.resource_value.is_some() {
+                return Err("bind: at most one of resource_json / resource_value".to_owned());
+            }
+            return Ok(Action::Bind {
+                kind: b.kind,
+                identity: b.identity,
+                resource_json: b.resource_json,
+                resource_value: b.resource_value,
+                when: b.when,
+            });
+        }
+        if let Some(l) = m.bind_lookup {
+            return Ok(Action::BindLookup {
+                resource_as: l.resource_as,
+                when: l.when,
+            });
+        }
+        if let Some(u) = m.unbind {
+            return Ok(Action::Unbind {
+                resource_as: u.resource_as,
+                when: u.when,
             });
         }
         // keys == 1 and the others are None, so map_response is present.
@@ -442,6 +632,11 @@ fn default_rollout() -> u8 {
 pub struct RuleSet {
     /// All rules, in document order (order matters for A/B bucketing).
     pub rules: Vec<Rule>,
+    /// Reverse-direction rules: how an inbound 5GC notification becomes an
+    /// originated Diameter request (PNR/RTR/PPR/RAR/ASR). Selected by binding
+    /// `kind`. Empty for interfaces with no server-push.
+    #[serde(default)]
+    pub notifications: Vec<NotificationRule>,
 }
 
 impl RuleSet {
@@ -525,9 +720,48 @@ impl RuleSet {
                             )));
                         }
                     }
-                    Action::HttpRequest { .. } => {}
+                    Action::Bind { kind, identity, .. } => {
+                        if kind.is_empty() || identity.is_empty() {
+                            return Err(CoreError::Adapter(format!(
+                                "rule {}: bind.kind and bind.identity must be non-empty",
+                                rule.id
+                            )));
+                        }
+                    }
+                    Action::BindLookup { resource_as, .. } => {
+                        if resource_as.is_empty() {
+                            return Err(CoreError::Adapter(format!(
+                                "rule {}: bind_lookup.resource_as must be non-empty",
+                                rule.id
+                            )));
+                        }
+                    }
+                    Action::Unbind { .. } | Action::HttpRequest { .. } => {}
                 }
             }
+        }
+        // notifications: ids unique, command/application set, AVP specs valid.
+        let mut nseen = std::collections::BTreeSet::new();
+        for n in &self.notifications {
+            if !nseen.insert(&n.id) {
+                return Err(CoreError::Adapter(format!(
+                    "duplicate notification id {}",
+                    n.id
+                )));
+            }
+            if n.bind_kind.is_empty() {
+                return Err(CoreError::Adapter(format!(
+                    "notification {}: bind_kind must be non-empty",
+                    n.id
+                )));
+            }
+            if n.emit.command == 0 || n.emit.application == 0 {
+                return Err(CoreError::Adapter(format!(
+                    "notification {}: emit.command and emit.application are required",
+                    n.id
+                )));
+            }
+            validate_avp_specs(&n.id, "emit", &n.emit.avps, catalog)?;
         }
         Ok(())
     }
@@ -558,44 +792,54 @@ impl RuleSet {
 }
 
 /// Validate one inline answer spec against the catalog: exactly one result
-/// disposition, AVP names known, `group` if and only if the AVP is Grouped.
+/// disposition, then the AVP specs (names known, `group` ⇔ Grouped).
 fn validate_answer_build(
     rule_id: &str,
     status_key: &str,
     build: &AnswerBuild,
     catalog: &AvpCatalog,
 ) -> Result<(), CoreError> {
-    let ctx = |msg: String| CoreError::Adapter(format!("rule {rule_id} ({status_key}): {msg}"));
     if build.result_code.is_some() == build.experimental_result.is_some() {
-        return Err(ctx(
-            "exactly one of result_code / experimental_result".to_owned()
-        ));
+        return Err(CoreError::Adapter(format!(
+            "rule {rule_id} ({status_key}): exactly one of result_code / experimental_result"
+        )));
     }
-    fn check_specs(
-        specs: &[AvpSpec],
-        catalog: &AvpCatalog,
-        ctx: &impl Fn(String) -> CoreError,
-    ) -> Result<(), CoreError> {
-        for spec in specs {
-            let def = catalog
-                .get(&spec.avp)
-                .ok_or_else(|| ctx(format!("unknown AVP name {}", spec.avp)))?;
-            match &spec.source {
-                AvpSource::Group(children) => {
-                    if def.kind != AvpKind::Grouped {
-                        return Err(ctx(format!("{} is not Grouped", spec.avp)));
-                    }
-                    check_specs(children, catalog, ctx)?;
+    validate_avp_specs(rule_id, status_key, &build.avps, catalog)
+}
+
+/// Validate a list of [`AvpSpec`]s (answer `avps` or notification `emit.avps`):
+/// every AVP name is known to the catalog and `group:` is used exactly for
+/// Grouped AVPs. Recurses into groups.
+fn validate_avp_specs(
+    id: &str,
+    scope: &str,
+    specs: &[AvpSpec],
+    catalog: &AvpCatalog,
+) -> Result<(), CoreError> {
+    for spec in specs {
+        let def = catalog.get(&spec.avp).ok_or_else(|| {
+            CoreError::Adapter(format!("{id} ({scope}): unknown AVP name {}", spec.avp))
+        })?;
+        match &spec.source {
+            AvpSource::Group(children) => {
+                if def.kind != AvpKind::Grouped {
+                    return Err(CoreError::Adapter(format!(
+                        "{id} ({scope}): {} is not Grouped",
+                        spec.avp
+                    )));
                 }
-                _ if def.kind == AvpKind::Grouped => {
-                    return Err(ctx(format!("{} is Grouped and needs `group:`", spec.avp)));
-                }
-                _ => {}
+                validate_avp_specs(id, scope, children, catalog)?;
             }
+            _ if def.kind == AvpKind::Grouped => {
+                return Err(CoreError::Adapter(format!(
+                    "{id} ({scope}): {} is Grouped and needs `group:`",
+                    spec.avp
+                )));
+            }
+            _ => {}
         }
-        Ok(())
     }
-    check_specs(&build.avps, catalog, &ctx)
+    Ok(())
 }
 
 /// Hot-swappable rule holder. Readers pay one atomic load per transaction;
@@ -844,6 +1088,84 @@ rules:
     version: v1
 "#;
         assert!(RuleSet::from_yaml(bad).is_err());
+    }
+
+    #[test]
+    fn notifications_and_bind_parse_and_validate() {
+        let doc = r#"
+rules:
+  - id: sh_snr
+    trigger: { diameter_application: 16777217, command_code: 308 }
+    actions:
+      - extract: { avp: "User-Name", as: id }
+      - http_request: { method: POST, nf_type: HSS, path: "/x/{id}/subscriptions" }
+      - bind: { kind: sh, identity: "{id}" }
+      - map_response: { default: { result_code: 2001 } }
+    version: v1
+notifications:
+  - id: sh_pnr
+    bind_kind: sh
+    emit:
+      command: 309
+      application: 16777217
+      avps:
+        - { avp: User-Name, value: "{identity}" }
+        - { avp: User-Data, from_body: true }
+"#;
+        let set = RuleSet::from_yaml(doc).expect("parse");
+        assert_eq!(set.notifications.len(), 1);
+        assert_eq!(set.notifications[0].emit.command, 309);
+        match &set.rules[0].actions[2] {
+            Action::Bind { kind, identity, .. } => {
+                assert_eq!(kind, "sh");
+                assert_eq!(identity, "{id}");
+            }
+            other => panic!("expected bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notification_rules_are_validated() {
+        let with_notif = |emit: &str| {
+            format!(
+                r#"
+rules: []
+notifications:
+  - id: n1
+    bind_kind: sh
+    emit:
+{emit}
+"#
+            )
+        };
+        // Unknown AVP in emit.
+        assert!(RuleSet::from_yaml(&with_notif(
+            "      command: 309\n      application: 16777217\n      avps: [ { avp: No-Such, value: x } ]"
+        ))
+        .is_err());
+        // Missing command/application.
+        assert!(RuleSet::from_yaml(&with_notif("      application: 16777217")).is_err());
+        // Grouped AVP without `group:`.
+        assert!(RuleSet::from_yaml(&with_notif(
+            "      command: 309\n      application: 16777217\n      avps: [ { avp: SIP-Auth-Data-Item, value: x } ]"
+        ))
+        .is_err());
+        // Well-formed.
+        assert!(RuleSet::from_yaml(&with_notif(
+            "      command: 309\n      application: 16777217\n      avps: [ { avp: User-Name, value: \"{identity}\" } ]"
+        ))
+        .is_ok());
+        // bind action requires kind + identity (empty identity rejected).
+        let bad_bind = r#"
+rules:
+  - id: r
+    trigger: { diameter_application: 1, command_code: 2 }
+    actions:
+      - bind: { kind: sh, identity: "" }
+      - map_response: { default: { result_code: 2001 } }
+    version: v1
+"#;
+        assert!(RuleSet::from_yaml(bad_bind).is_err());
     }
 
     #[test]

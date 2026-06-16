@@ -5,7 +5,10 @@
 #![deny(warnings)]
 #![forbid(unsafe_code)]
 
+mod binding_store;
 mod diameter_front;
+mod notification;
+mod peer_registry;
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -14,7 +17,7 @@ use std::time::Duration;
 
 use iwf_admin::{admin_router, metrics_router, AdminState, Readiness};
 use iwf_core::error::CoreError;
-use iwf_core::ports::{SbaPort, SbiRequest, SbiResponse, TokenProvider};
+use iwf_core::ports::{BindingStore, SbaPort, SbiRequest, SbiResponse, TokenProvider};
 use iwf_discovery::{DiscoveryService, HeartbeatConfig, HeartbeatTask, NrfClient};
 use iwf_observability::Metrics;
 use iwf_sba::{SbaClient, SbaClientConfig};
@@ -205,16 +208,29 @@ async fn run() {
         metrics: metrics.clone(),
     });
 
-    let engine = Arc::new(
-        TranslationEngine::new(
-            rules.clone(),
-            PluginRegistry::with_builtins(),
-            sba,
-            config.diameter.origin_host.clone(),
-            config.diameter.origin_realm.clone(),
-        )
-        .with_catalog(catalog),
-    );
+    // ---- bindings + engine -------------------------------------------------
+    // The notification flows (server-push / teardown) need a binding store
+    // shared between the engine (records on `bind`) and the notification
+    // server (reads to route). Built only when notifications are configured.
+    let bindings: Option<Arc<binding_store::InMemoryBindings>> = config
+        .notification
+        .as_ref()
+        .map(|_| Arc::new(binding_store::InMemoryBindings::default()));
+
+    let mut engine = TranslationEngine::new(
+        rules.clone(),
+        PluginRegistry::with_builtins(),
+        sba,
+        config.diameter.origin_host.clone(),
+        config.diameter.origin_realm.clone(),
+    )
+    .with_catalog(catalog);
+    if let (Some(b), Some(nc)) = (&bindings, &config.notification) {
+        engine = engine
+            .with_bindings(b.clone())
+            .with_notification_base(nc.advertised_uri.clone());
+    }
+    let engine = Arc::new(engine);
 
     // ---- NRF registration / heartbeat --------------------------------------
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -257,12 +273,27 @@ async fn run() {
     spawn_http(&config.admin.listen, admin_router(admin_state.clone())).await;
     spawn_http(&config.admin.metrics_listen, metrics_router(admin_state)).await;
 
+    // ---- notification callback server (server-push flows) ------------------
+    let peers = Arc::new(peer_registry::PeerRegistry::new());
+    if let (Some(b), Some(nc)) = (&bindings, &config.notification) {
+        let state = notification::NotificationState {
+            peers: peers.clone(),
+            bindings: b.clone() as Arc<dyn BindingStore>,
+            engine: engine.clone(),
+            rules: rules.clone(),
+            timeout: config.transaction_timeout(),
+        };
+        spawn_http(&nc.listen, notification::notification_router(state)).await;
+        tracing::info!(listen = %nc.listen, advertised = %nc.advertised_uri, "notification callback server up");
+    }
+
     // ---- Diameter front-end ---------------------------------------------------
     let front = diameter_front::DiameterFront::new(
         config.clone(),
         engine,
         metrics.clone(),
         readiness.clone(),
+        peers.clone(),
     );
     let front_handle = match front.spawn().await {
         Ok(h) => h,

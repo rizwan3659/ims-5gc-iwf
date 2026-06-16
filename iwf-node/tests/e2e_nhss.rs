@@ -1,12 +1,16 @@
 //! End-to-end Nhss integration test (3GPP TS 29.562): boots the real
 //! `iwf-node` binary with the *shipped* `config/rules-nhss.yaml` against an
-//! in-process mock NRF + Nhss HSS (the same route set as
-//! `iwf-benchmark/src/bin/mock_nhss.rs`), then drives every Phase-1 flow —
-//! UAR, LIR, SAR (registration + deregistration), MAR, UDR, PUR — over a
-//! real Diameter TCP connection.
+//! in-process mock NRF + Nhss HSS, then drives the flows over a real Diameter
+//! TCP connection:
+//!   * Phase 1 (terminating): UAR, LIR, SAR, MAR, UDR, PUR.
+//!   * Phase 2 (server-push): Sh SNR → bind → an HSS notification → the IWF
+//!     **originates** a PNR back to the AS; Cx SAR-register → bind → an HSS
+//!     deregistration → the IWF originates an RTR to the S-CSCF.
 //!
 //! The NRF advertises the HSS via `nfServices[].ipEndPoints` (not
-//! `apiPrefix`), matching observed Open5GS behavior.
+//! `apiPrefix`), matching observed Open5GS behavior. (Rx/Ro translation is
+//! covered by `iwf-translation` engine tests; their full-node e2e needs a
+//! multi-NF discovery mock — a follow-up.)
 
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -136,6 +140,16 @@ async fn spawn_mock_nhss(hss_port: u16) -> String {
             .put(|| async { axum::http::StatusCode::NO_CONTENT }),
         )
         .route(
+            // Sh SNR → SDM Subscribe: 201 with a subscription resource.
+            "/nhss-ims-sdm/v1/:imsUeId/subscriptions",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::CREATED,
+                    axum::Json(serde_json::json!({"subscriptionId": "sub-1"})),
+                )
+            }),
+        )
+        .route(
             "/nhss-ims-ueau/v1/:imsUeId/ims-aka/generate-av",
             axum::routing::post(|| async {
                 axum::Json(serde_json::json!({
@@ -160,6 +174,7 @@ async fn spawn_mock_nhss(hss_port: u16) -> String {
 struct NodeProcess {
     child: Child,
     diameter_addr: String,
+    notif_addr: String,
 }
 
 impl Drop for NodeProcess {
@@ -173,8 +188,14 @@ async fn spawn_node(nrf_uri: &str) -> NodeProcess {
     let diameter_port = free_port().await;
     let admin_port = free_port().await;
     let metrics_port = free_port().await;
+    let notif_port = free_port().await;
 
-    let dir = std::env::temp_dir().join(format!("iwf-e2e-nhss-{}", std::process::id()));
+    // Unique per spawn (diameter_port) so concurrently-running tests don't
+    // clobber each other's config/rules files.
+    let dir = std::env::temp_dir().join(format!(
+        "iwf-e2e-nhss-{}-{diameter_port}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let rules_path = dir.join("rules-nhss.yaml");
     std::fs::write(&rules_path, RULES).expect("rules");
@@ -198,6 +219,9 @@ admin:
   jwt_hs256_secret_env: "IWF_E2E_JWT_SECRET"
 rules_file: "{rules}"
 dictionary_file: "{dictionary}"
+notification:
+  listen: "127.0.0.1:{notif_port}"
+  advertised_uri: "http://127.0.0.1:{notif_port}"
 "#,
             rules = rules_path.display(),
             dictionary = dictionary_path.display()
@@ -216,6 +240,7 @@ dictionary_file: "{dictionary}"
     let node = NodeProcess {
         child,
         diameter_addr: format!("127.0.0.1:{diameter_port}"),
+        notif_addr: format!("127.0.0.1:{notif_port}"),
     };
 
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -262,11 +287,22 @@ impl DiameterSession {
         write_frame(&mut self.writer, &request)
             .await
             .expect("send request");
+        self.recv().await
+    }
+
+    /// Read one message off the connection (an answer, or an IWF-originated
+    /// request such as PNR).
+    async fn recv(&mut self) -> Message {
         let frame = read_frame(&mut self.reader, DEFAULT_MAX_FRAME)
             .await
-            .expect("read answer")
-            .expect("answer frame");
-        Message::decode(frame).expect("decode answer")
+            .expect("read frame")
+            .expect("frame");
+        Message::decode(frame).expect("decode")
+    }
+
+    /// Write one message (e.g. a PNA answering an IWF-originated PNR).
+    async fn send(&mut self, msg: Message) {
+        write_frame(&mut self.writer, &msg).await.expect("send");
     }
 }
 
@@ -343,6 +379,14 @@ async fn nhss_flows_end_to_end() {
     // --- Cx SAR (REGISTRATION) → UECM PUT registration + profile → SAA -----
     let sar = MessageBuilder::request(dict::CMD_SAR, dict::APP_CX)
         .ids(13, 13)
+        .std(
+            dict::AVP_SESSION_ID,
+            AvpValue::Utf8("scscf;13;1".to_owned()),
+        )
+        .std(
+            dict::AVP_ORIGIN_HOST,
+            AvpValue::Utf8("icscf.ims.example.org".to_owned()),
+        )
         .tgpp(
             dict::AVP_PUBLIC_IDENTITY,
             AvpValue::Utf8("sip:alice@ims.example.org".to_owned()),
@@ -370,6 +414,10 @@ async fn nhss_flows_end_to_end() {
     // --- Cx SAR (USER_DEREGISTRATION) → UECM PUT deregistration → SAA ------
     let sar = MessageBuilder::request(dict::CMD_SAR, dict::APP_CX)
         .ids(14, 14)
+        .std(
+            dict::AVP_SESSION_ID,
+            AvpValue::Utf8("scscf;14;1".to_owned()),
+        )
         .tgpp(
             dict::AVP_PUBLIC_IDENTITY,
             AvpValue::Utf8("sip:alice@ims.example.org".to_owned()),
@@ -430,4 +478,212 @@ async fn nhss_flows_end_to_end() {
         .build();
     let answer = session.transact(pur).await;
     assert_eq!(answer.result_code(), Some(dict::RC_SUCCESS));
+}
+
+/// Sh SNR (subscribe) → bind, then an Nhss data-change notification → the IWF
+/// originates a Diameter PNR to the subscribing AS over its connection.
+#[tokio::test]
+async fn sh_snr_then_pnr_notification() {
+    let hss_port = free_port().await;
+    let nrf_uri = spawn_mock_nhss(hss_port).await;
+    let node = spawn_node(&nrf_uri).await;
+    let mut session = DiameterSession::open(&node.diameter_addr).await;
+
+    // --- Sh SNR → SDM Subscribe → SNA 2001, binding recorded --------------
+    // Origin-Host must match the CER origin host so the IWF can originate the
+    // PNR back over this same connection.
+    let snr = MessageBuilder::request(dict::CMD_SNR, dict::APP_SH)
+        .ids(20, 20)
+        .std(
+            dict::AVP_SESSION_ID,
+            AvpValue::Utf8("as-sub;20;1".to_owned()),
+        )
+        .std(
+            dict::AVP_ORIGIN_HOST,
+            AvpValue::Utf8("icscf.ims.example.org".to_owned()),
+        )
+        .std(
+            dict::AVP_ORIGIN_REALM,
+            AvpValue::Utf8("ims.example.org".to_owned()),
+        )
+        .tgpp(
+            dict::AVP_PUBLIC_IDENTITY,
+            AvpValue::Utf8("sip:alice@ims.example.org".to_owned()),
+        )
+        .build();
+    let sna = session.transact(snr).await;
+    assert_eq!(sna.header.command, dict::CMD_SNR);
+    assert_eq!(sna.result_code(), Some(dict::RC_SUCCESS));
+
+    // --- Fire the HSS notification to the IWF callback (binding = Session-Id,
+    //     percent-encoded). The POST blocks until the IWF gets the PNA. ------
+    let notif_url = format!("http://{}/iwf-notif/v1/as-sub%3B20%3B1", node.notif_addr);
+    let post =
+        tokio::spawn(async move { http_post(&notif_url, r#"{"changed":"profile-data"}"#).await });
+
+    // --- The IWF originates a PNR on this connection ----------------------
+    let pnr = session.recv().await;
+    assert!(pnr.header.flags.request(), "PNR is a request");
+    assert_eq!(pnr.header.command, dict::CMD_PNR);
+    assert_eq!(pnr.header.application, dict::APP_SH);
+    assert_eq!(
+        pnr.find(dict::AVP_DESTINATION_HOST, None)
+            .and_then(|a| a.as_utf8().ok()),
+        Some("icscf.ims.example.org"),
+        "routed to the subscribing AS"
+    );
+    // User-Identity (grouped) carries the bound subscriber Public-Identity.
+    let user_identity = pnr
+        .find(dict::AVP_USER_IDENTITY, Some(dict::VENDOR_3GPP))
+        .expect("User-Identity")
+        .as_grouped()
+        .expect("grouped");
+    assert_eq!(
+        user_identity
+            .iter()
+            .find(|a| a.code == dict::AVP_PUBLIC_IDENTITY)
+            .and_then(|a| a.as_utf8().ok()),
+        Some("sip:alice@ims.example.org")
+    );
+    // The changed data was echoed from the notification body.
+    let user_data = pnr
+        .find(dict::AVP_USER_DATA, Some(dict::VENDOR_3GPP))
+        .expect("User-Data");
+    let body: serde_json::Value = serde_json::from_slice(&user_data.data).expect("json");
+    assert_eq!(body["changed"], "profile-data");
+
+    // --- AS answers PNA 2001 → the IWF returns 204 to the HSS notification --
+    let pna = MessageBuilder::answer_to(&pnr.header)
+        .std(
+            dict::AVP_SESSION_ID,
+            AvpValue::Utf8(pnr.session_id().expect("PNR Session-Id").to_owned()),
+        )
+        .std(
+            dict::AVP_ORIGIN_HOST,
+            AvpValue::Utf8("icscf.ims.example.org".to_owned()),
+        )
+        .std(
+            dict::AVP_ORIGIN_REALM,
+            AvpValue::Utf8("ims.example.org".to_owned()),
+        )
+        .std(dict::AVP_RESULT_CODE, AvpValue::U32(dict::RC_SUCCESS))
+        .build();
+    session.send(pna).await;
+
+    let status = post.await.expect("post task");
+    assert_eq!(status, 204, "HSS notification acknowledged after PNA");
+}
+
+/// Cx SAR (register) → bind, then an HSS deregistration notification → the IWF
+/// originates a Diameter RTR to the serving S-CSCF; event routing picks RTR
+/// (not PPR) from the notification body's `notificationType`.
+#[tokio::test]
+async fn cx_dereg_notification_originates_rtr() {
+    let hss_port = free_port().await;
+    let nrf_uri = spawn_mock_nhss(hss_port).await;
+    let node = spawn_node(&nrf_uri).await;
+    let mut session = DiameterSession::open(&node.diameter_addr).await;
+
+    // --- SAR (REGISTRATION) records the S-CSCF binding (key = Session-Id) ---
+    let sar = MessageBuilder::request(dict::CMD_SAR, dict::APP_CX)
+        .ids(30, 30)
+        .std(
+            dict::AVP_SESSION_ID,
+            AvpValue::Utf8("scscf;30;1".to_owned()),
+        )
+        .std(
+            dict::AVP_ORIGIN_HOST,
+            AvpValue::Utf8("icscf.ims.example.org".to_owned()),
+        )
+        .tgpp(
+            dict::AVP_PUBLIC_IDENTITY,
+            AvpValue::Utf8("sip:alice@ims.example.org".to_owned()),
+        )
+        .tgpp(
+            dict::AVP_SERVER_ASSIGNMENT_TYPE,
+            AvpValue::Enum(dict::server_assignment_type::REGISTRATION),
+        )
+        .build();
+    assert_eq!(
+        session.transact(sar).await.result_code(),
+        Some(dict::RC_SUCCESS)
+    );
+
+    // --- HSS deregistration notification → IWF originates RTR --------------
+    let notif_url = format!("http://{}/iwf-notif/v1/scscf%3B30%3B1", node.notif_addr);
+    let post = tokio::spawn(async move {
+        http_post(
+            &notif_url,
+            r#"{"notificationType":"DEREGISTRATION","reason":"admin-removed"}"#,
+        )
+        .await
+    });
+
+    let rtr = session.recv().await;
+    assert!(rtr.header.flags.request());
+    assert_eq!(rtr.header.command, dict::CMD_RTR);
+    assert_eq!(rtr.header.application, dict::APP_CX);
+    assert_eq!(
+        rtr.find(dict::AVP_PUBLIC_IDENTITY, Some(dict::VENDOR_3GPP))
+            .and_then(|a| a.as_utf8().ok()),
+        Some("sip:alice@ims.example.org")
+    );
+    // Deregistration-Reason (grouped) with Reason-Code + Reason-Info from body.
+    let dereg = rtr
+        .find(dict::AVP_DEREGISTRATION_REASON, Some(dict::VENDOR_3GPP))
+        .expect("Deregistration-Reason")
+        .as_grouped()
+        .expect("grouped");
+    assert_eq!(
+        dereg
+            .iter()
+            .find(|a| a.code == dict::AVP_REASON_INFO)
+            .and_then(|a| a.as_utf8().ok()),
+        Some("admin-removed")
+    );
+
+    // --- S-CSCF answers RTA 2001 → 204 to the HSS notification -------------
+    let rta = MessageBuilder::answer_to(&rtr.header)
+        .std(
+            dict::AVP_SESSION_ID,
+            AvpValue::Utf8(rtr.session_id().expect("RTR Session-Id").to_owned()),
+        )
+        .std(
+            dict::AVP_ORIGIN_HOST,
+            AvpValue::Utf8("icscf.ims.example.org".to_owned()),
+        )
+        .std(dict::AVP_RESULT_CODE, AvpValue::U32(dict::RC_SUCCESS))
+        .build();
+    session.send(rta).await;
+
+    assert_eq!(post.await.expect("post"), 204);
+}
+
+/// Minimal HTTP/1.1 POST returning the status code (avoids a client dep).
+async fn http_post(url: &str, body: &str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let without_scheme = url.strip_prefix("http://").expect("http url");
+    let (host, path) = without_scheme
+        .split_once('/')
+        .map(|(h, p)| (h, format!("/{p}")))
+        .unwrap_or((without_scheme, "/".to_owned()));
+    let mut stream = TcpStream::connect(host).await.expect("connect notif");
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("send notif");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .await
+        .expect("read notif response");
+    response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("status code")
 }
