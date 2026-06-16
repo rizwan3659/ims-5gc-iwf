@@ -27,6 +27,10 @@ rules_file: "/etc/iwf/rules.yaml"
 # rule DSL; see config/dictionary.yaml). Unset → builtin Cx/Sh table.
 # dictionary_file: "/etc/iwf/dictionary.yaml"
 
+# notification:              # inbound 5GC callback server (Phase 2 server-push:
+#   listen: "0.0.0.0:8081"   # Sh PNR, Cx RTR/PPR, Rx RAR/ASR). Unset = disabled.
+#   advertised_uri: "http://iwf-notif.epc.svc.cluster.local:8081"
+
 # tls:                       # enable for direct (non-mesh) mTLS
 #   cert: /etc/iwf/tls/tls.crt
 #   key: /etc/iwf/tls/tls.key

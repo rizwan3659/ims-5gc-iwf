@@ -26,6 +26,8 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+use crate::peer_registry::PeerRegistry;
+
 /// Shared front-end state.
 pub struct DiameterFront {
     config: Arc<iwf_config::Config>,
@@ -33,6 +35,9 @@ pub struct DiameterFront {
     metrics: Metrics,
     readiness: Arc<Readiness>,
     in_flight: Arc<AtomicU64>,
+    /// Registry of OPEN peers, so the notification path can originate
+    /// requests (RTR/PPR/PNR/RAR/ASR) into a live connection.
+    peers: Arc<PeerRegistry>,
 }
 
 /// Handle used by the shutdown sequence.
@@ -67,6 +72,7 @@ impl DiameterFront {
         engine: Arc<TranslationEngine>,
         metrics: Metrics,
         readiness: Arc<Readiness>,
+        peers: Arc<PeerRegistry>,
     ) -> Self {
         DiameterFront {
             config,
@@ -74,6 +80,7 @@ impl DiameterFront {
             metrics,
             readiness,
             in_flight: Arc::new(AtomicU64::new(0)),
+            peers,
         }
     }
 
@@ -158,6 +165,9 @@ impl DiameterFront {
         let mut fsm = PeerFsm::new();
         let local = self.local_identity();
         let mut peer_host = String::from("unknown");
+        // Set once the peer reaches OPEN; the reader loop routes answers to
+        // these waiters and the connection deregisters on exit.
+        let mut pending: Option<crate::peer_registry::Pending> = None;
         let watchdog = self.config.watchdog_interval();
         // Peer supervision: if no traffic (including DWR) arrives within two
         // watchdog intervals the connection is considered dead (RFC 3539).
@@ -205,6 +215,10 @@ impl DiameterFront {
                         fsm.on_event(PeerEvent::RRcvCer);
                         self.metrics.set_peer_state(&peer_host, fsm.state().label());
                         self.readiness.peer_connected.store(true, Ordering::Release);
+                        // Register for origination: the notification path can
+                        // now push RTR/PPR/PNR/RAR/ASR into this connection's
+                        // writer queue and await the answer via `pending`.
+                        pending = Some(self.peers.register(&peer_host, answer_tx.clone()));
                         let cea = local.build_cea(&message, dict::RC_SUCCESS);
                         if answer_tx.send(cea).await.is_err() {
                             break;
@@ -244,16 +258,25 @@ impl DiameterFront {
                     break;
                 }
                 (_, false) => {
-                    // We do not originate Diameter requests in this build
-                    // (RTR/PPR origination is remaining scope), so answers
-                    // are unexpected.
-                    tracing::debug!(command = message.header.command, "ignoring answer");
+                    // Answer to a request we originated (RTR/PPR/PNR/RAR/ASR):
+                    // hand it to the waiting originator by Hop-by-Hop id.
+                    // Unmatched answers (no waiter) are unsolicited; ignore.
+                    let hbh = message.header.hop_by_hop;
+                    let matched = pending
+                        .as_ref()
+                        .is_some_and(|p| PeerRegistry::resolve_answer(p, hbh, message));
+                    if !matched {
+                        tracing::debug!(hop_by_hop = hbh, "unsolicited answer ignored");
+                    }
                 }
             }
         }
 
         fsm.on_event(PeerEvent::PeerDisc);
         self.metrics.set_peer_state(&peer_host, fsm.state().label());
+        if pending.is_some() {
+            self.peers.deregister(&peer_host);
+        }
         drop(answer_tx);
         let _ = writer_task.await;
     }

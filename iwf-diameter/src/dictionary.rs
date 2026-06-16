@@ -58,6 +58,29 @@ pub const CMD_SNR: u32 = 308;
 /// Push-Notification-Request/Answer.
 pub const CMD_PNR: u32 = 309;
 
+// ---- Rx command codes (TS 29.214 §5.6) / RFC 6733 reused --------------------
+
+/// AA-Request/Answer (Rx, RFC 7155 §3.1).
+pub const CMD_AAR: u32 = 265;
+/// Re-Auth-Request/Answer (RFC 6733 §8.3).
+pub const CMD_RAR: u32 = 258;
+/// Session-Termination-Request/Answer (RFC 6733 §8.4).
+pub const CMD_STR: u32 = 275;
+/// Abort-Session-Request/Answer (RFC 6733 §8.5).
+pub const CMD_ASR: u32 = 274;
+
+// ---- Ro command codes (TS 32.299 / RFC 4006) -------------------------------
+
+/// Credit-Control-Request/Answer (RFC 4006 §3.1).
+pub const CMD_CCR: u32 = 272;
+
+// ---- Additional application ids --------------------------------------------
+
+/// Rx (TS 29.214).
+pub const APP_RX: u32 = 16_777_236;
+/// Diameter Credit-Control Application — Ro (RFC 4006 / TS 32.299).
+pub const APP_RO: u32 = 4;
+
 // ---- Base AVP codes (RFC 6733 §4.5) -----------------------------------------
 
 /// User-Name (NAI / IMPI).

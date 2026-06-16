@@ -1,20 +1,27 @@
-# CDOT-iwf translation rules — IMS HSS profile (3GPP TS 29.562, Rel-19).
+# CDOT-iwf translation rules — IMS interworking pack (full interface suite).
 #
-# Maps IMS Diameter Cx/Sh commands onto the Nhss IMS services produced by a
-# 5G HSS: Nhss_imsUECM, Nhss_imsSDM, Nhss_imsUEAU. Target NF type = HSS
-# (discovered via NRF with target-nf-type=HSS).
+# Maps the IMS Diameter interfaces onto their 5GC SBI producers:
+#   Cx/Dx (TS 29.229)  -> Nhss_ims*  (HSS, TS 29.562)
+#   Sh    (TS 29.329)  -> Nhss_ims*  (HSS)
+#   Rx    (TS 29.214)  -> Npcf_PolicyAuthorization (PCF, TS 29.514)
+#   Ro    (TS 32.299)  -> Nchf_ConvergedCharging   (CHF, TS 32.290/291)
+# NF types are discovered via NRF (target-nf-type=HSS/PCF/CHF).
 #
-# This interface is **fully declarative**: AVP names resolve through the
-# dictionary (config/dictionary.yaml or the builtin catalog) and every
-# map_response value is an inline answer spec — result_code /
-# experimental_result plus JSON→AVP mappings — rendered by the engine.
-# No compiled plugin is involved, so retargeting a field or adding an
-# operation is an edit to this file (hot-reloadable via the admin API).
+# This pack is **fully declarative**: AVP names resolve through the dictionary
+# (config/dictionary.yaml or the builtin catalog) and every map_response value
+# is an inline answer spec — result_code / experimental_result plus JSON→AVP
+# mappings — rendered by the engine. No compiled plugin is involved, so
+# retargeting a field or adding an operation is an edit to this file
+# (hot-reloadable via the admin API).
 #
-# Phase 1 (this file): terminating request/response flows — UAR, LIR, SAR,
-# MAR, UDR, PUR. The notification/origination flows (SNR, PNR,
-# Deregistration-Notification) require outbound Diameter + a notification
-# callback server and are deferred to Phase 2.
+# Coverage:
+#   * Phase 1 — terminating: UAR, LIR, SAR, MAR, UDR, PUR.
+#   * Phase 2 — subscribe + server-push + charging: SNR (+ PNR), Cx RTR/PPR,
+#     Rx AAR/STR (+ RAR/ASR), Ro CCR (Initial/Update/Terminate). The reverse
+#     direction lives in the `notifications:` section (see ADR-0006); `bind`/
+#     `bind_lookup`/`unbind` carry session→5GC-resource state.
+# (Filename kept as rules-nhss.yaml for include stability; it is the aggregate
+#  IMS pack, not HSS-only.)
 #
 # DSL notes:
 #   * {imsUeId} here is the IMPI (User-Name) or IMPU (Public-Identity) per the
@@ -108,10 +115,16 @@ rules:
           path: "/nhss-ims-uecm/v1/{imsUeId}/{uecmOp}"
           body:
             scscfName: "{scscfName}"
+            # Callback the HSS invokes for dereg/profile-update notifications
+            # (keyed by this SAR's Session-Id). Drives RTR/PPR origination.
+            notificationUri: "{notification_uri}"
       - http_request:
           method: GET
           nf_type: HSS
           path: "/nhss-ims-sdm/v1/{imsUeId}/ims-data/profile-data"
+      # Record the serving S-CSCF for this user so an HSS dereg/profile-update
+      # notification can originate RTR/PPR back to it (notifications: cx_*).
+      - bind: { kind: cx, identity: "{imsUeId}" }
       - map_response:
           200:
             result_code: 2001
@@ -217,3 +230,183 @@ rules:
           404: { experimental_result: 5001 }
           default: { result_code: 5012 }
     version: "ts29562-r19"
+
+  # ---- 7. Sh SNR -> SDM Subscribe (+ bind for server-push) ----------------
+  #   The AS subscribes to data-change notifications. The IWF creates an Nhss
+  #   SDM subscription whose callbackReference is its own notification URL
+  #   ({notification_uri}, keyed by this SNR's Session-Id) and records a
+  #   binding so the later PNR (notifications: sh_pnr) can route back.
+  - id: sh_snr_nhss
+    trigger: { diameter_application: 16777217, command_code: 308 }   # Sh SNR
+    actions:
+      - extract: { avp: "Public-Identity", as: imsUeId }
+      - http_request:
+          method: POST
+          nf_type: HSS
+          path: "/nhss-ims-sdm/v1/{imsUeId}/subscriptions"
+          body:
+            callbackReference: "{notification_uri}"
+            monitoredResourceUris: ["ims-data/profile-data"]
+      - bind: { kind: sh, identity: "{imsUeId}" }
+      - map_response:
+          200: { result_code: 2001 }
+          201: { result_code: 2001 }
+          404: { experimental_result: 5001 }
+          default: { result_code: 5012 }
+    version: "ts29562-r19"
+
+  # ---- 8. Rx AAR -> Npcf_PolicyAuthorization create (+ bind) --------------
+  #   The P-CSCF/AF requests media authorization. The IWF creates a PCF
+  #   application session and binds its appSessionId to this Rx Session-Id so
+  #   STR can delete it and RAR/ASR (notifications) can be pushed to the AF.
+  - id: rx_aar
+    trigger: { diameter_application: 16777236, command_code: 265 }   # Rx AAR
+    actions:
+      - extract: { avp: "Framed-IP-Address", as: ueIp, required: false }
+      - extract: { avp: "AF-Application-Identifier", as: afAppRaw, required: false }
+      - set_var: { from: afAppRaw, as: afApp, default: "ims-af" }
+      - http_request:
+          method: POST
+          nf_type: PCF
+          path: "/npcf-policyauthorization/v1/app-sessions"
+          body:
+            ascReqData:
+              notifUri: "{notification_uri}"
+              suppFeat: "0"
+      - bind: { kind: rx, identity: "{afApp}", resource_json: "/appSessionId" }
+      - map_response:
+          200: { result_code: 2001 }
+          201: { result_code: 2001 }
+          default: { result_code: 5012 }
+    version: "ts29214-rx"
+
+  # ---- 9. Rx STR -> Npcf_PolicyAuthorization delete (unbind) --------------
+  - id: rx_str
+    trigger: { diameter_application: 16777236, command_code: 275 }   # Rx STR
+    actions:
+      # Load + remove the binding; {appSessionId} addresses the PCF resource.
+      - unbind: { resource_as: appSessionId }
+      - http_request:
+          method: POST
+          nf_type: PCF
+          path: "/npcf-policyauthorization/v1/app-sessions/{appSessionId}/delete"
+      - map_response:
+          200: { result_code: 2001 }
+          204: { result_code: 2001 }
+          default: { result_code: 5012 }
+    version: "ts29214-rx"
+
+  # ---- 10. Ro CCR -> Nchf_ConvergedCharging (create/update/release) -------
+  #   CC-Request-Type selects the operation on one charging session, keyed by
+  #   Session-Id: INITIAL creates+binds the chargingDataRef, UPDATE references
+  #   it (bind_lookup), TERMINATION references+frees it (unbind). The path
+  #   suffix carries {chargingRef}, resolved from the binding before the call.
+  - id: ro_ccr
+    trigger: { diameter_application: 4, command_code: 272 }          # Ro CCR
+    actions:
+      - extract: { avp: "CC-Request-Type", as: crType }
+      - extract: { avp: "CC-Request-Number", as: crNum, required: false }
+      # UPDATE (2) / TERMINATION (3) need the bound chargingDataRef first.
+      - bind_lookup: { resource_as: chargingRef, when: { var: crType, equals: "2" } }
+      - unbind: { resource_as: chargingRef, when: { var: crType, equals: "3" } }
+      - set_var:
+          from: crType
+          as: chargeOp
+          map:
+            "1": "chargingdata"
+            "2": "chargingdata/{chargingRef}/update"
+            "3": "chargingdata/{chargingRef}/release"
+          default: "chargingdata"
+      - http_request:
+          method: POST
+          nf_type: CHF
+          path: "/nchf-convergedcharging/v1/{chargeOp}"
+          body:
+            notifyUri: "{notification_uri}"
+      # INITIAL (1) binds the new charging resource for later U/T + re-auth.
+      - bind:
+          kind: ro
+          identity: "{crType}"
+          resource_json: "/chargingDataRef"
+          when: { var: crType, equals: "1" }
+      - map_response:
+          200:
+            result_code: 2001
+            avps:
+              - { avp: CC-Request-Type, value: "{crType}" }
+              - avp: Multiple-Services-Credit-Control
+                group:
+                  - avp: Granted-Service-Unit
+                    group:
+                      - { avp: CC-Time, from_json: "/grantedUnit/ccTime" }
+          201: { result_code: 2001 }
+          default: { result_code: 5012 }
+    version: "ts32299-ro"
+
+# Reverse direction: an inbound Nhss SDM data-change notification becomes an
+# originated Sh PNR (TS 29.329 §6.1.5) to the subscribing AS. Selected by the
+# binding's kind (sh). User-Identity is rebuilt from the bound subscriber
+# identity; the changed data is echoed from the notification body.
+notifications:
+  - id: sh_pnr_nhss
+    bind_kind: sh
+    emit:
+      command: 309          # PNR
+      application: 16777217 # Sh
+      avps:
+        - avp: User-Identity
+          group:
+            - { avp: Public-Identity, value: "{identity}" }
+        - { avp: User-Data, from_body: true }
+
+  # Cx RTR (TS 29.229 §6.1.3): an HSS deregistration notification → the IWF
+  # originates a Registration-Termination-Request to the serving S-CSCF.
+  - id: cx_rtr_nhss
+    bind_kind: cx
+    match: { json: "/notificationType", equals: "DEREGISTRATION" }
+    emit:
+      command: 304          # RTR
+      application: 16777216 # Cx
+      avps:
+        - { avp: Public-Identity, value: "{identity}" }
+        - avp: Deregistration-Reason
+          group:
+            - { avp: Reason-Code, value: "0" }      # PERMANENT_TERMINATION
+            - { avp: Reason-Info, from_json: "/reason" }
+
+  # Cx PPR (TS 29.229 §6.1.4): an HSS profile-update notification → the IWF
+  # originates a Push-Profile-Request carrying the updated user data.
+  - id: cx_ppr_nhss
+    bind_kind: cx
+    match: { json: "/notificationType", equals: "PROFILE_UPDATE" }
+    emit:
+      command: 305          # PPR
+      application: 16777216 # Cx
+      avps:
+        - { avp: Public-Identity, value: "{identity}" }
+        - { avp: User-Data, from_body: true }
+
+  # Rx RAR (TS 29.214 §5.6.3): a PCF policy event (e.g. QoS change) → the IWF
+  # originates a Re-Auth-Request on the *same* Rx session to the AF.
+  - id: rx_rar
+    bind_kind: rx
+    match: { json: "/eventType", equals: "QOS_NOTIF" }
+    emit:
+      command: 258          # RAR
+      application: 16777236 # Rx
+      reuse_session: true
+      avps:
+        - { avp: Re-Auth-Request-Type, value: "0" }       # AUTHORIZE_ONLY
+        - { avp: Specific-Action, from_json: "/specificAction" }
+
+  # Rx ASR (TS 29.214 §5.6.5): a PCF abort (e.g. resources lost) → the IWF
+  # originates an Abort-Session-Request on the Rx session to the AF.
+  - id: rx_asr
+    bind_kind: rx
+    match: { json: "/eventType", equals: "ABORT" }
+    emit:
+      command: 274          # ASR
+      application: 16777236 # Rx
+      reuse_session: true
+      avps:
+        - { avp: Abort-Cause, value: "0" }                # BEARER_RELEASED

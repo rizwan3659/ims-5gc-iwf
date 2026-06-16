@@ -3,12 +3,13 @@
 //! the Diameter answer via the named plugin.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use iwf_core::error::CoreError;
-use iwf_core::ports::{SbaPort, SbiRequest, SbiResponse};
-use iwf_diameter::message::Message;
+use iwf_core::ports::{Binding, BindingStore, SbaPort, SbiRequest, SbiResponse};
+use iwf_diameter::message::{Message, MessageBuilder};
 
 use iwf_diameter::avp::{avp, avp_vendor, Avp, AvpValue};
 use iwf_diameter::dictionary as dict;
@@ -16,8 +17,8 @@ use iwf_diameter::dictionary as dict;
 use crate::catalog::{AvpCatalog, AvpKind};
 use crate::plugin::{experimental_result, PluginRegistry, TranslationContext};
 use crate::rule::{
-    Action, AnswerBuild, AnswerSpec, AvpSource, AvpSpec, ConcatPart, Decode, PartSource, Rule,
-    RuleStore,
+    Action, AnswerBuild, AnswerSpec, AvpSource, AvpSpec, ConcatPart, Decode, Guard,
+    NotificationRule, PartSource, Rule, RuleStore,
 };
 
 /// Engine wiring: rule store (hot-swappable), plugin registry, AVP catalog,
@@ -29,6 +30,14 @@ pub struct TranslationEngine {
     sba: Arc<dyn SbaPort>,
     origin_host: String,
     origin_realm: String,
+    /// Session/resource bindings for server-push + teardown (`bind`/`unbind`,
+    /// notifications). `None` disables those flows.
+    bindings: Option<Arc<dyn BindingStore>>,
+    /// Base URL the IWF advertises as the 5GC callback (`{notification_uri}`
+    /// var). `None` → the var is unset.
+    notification_base: Option<String>,
+    /// Monotonic suffix for generated Session-Ids (originated requests).
+    session_seq: AtomicU32,
 }
 
 impl std::fmt::Debug for TranslationEngine {
@@ -56,6 +65,9 @@ impl TranslationEngine {
             sba,
             origin_host: origin_host.into(),
             origin_realm: origin_realm.into(),
+            bindings: None,
+            notification_base: None,
+            session_seq: AtomicU32::new(1),
         }
     }
 
@@ -63,6 +75,20 @@ impl TranslationEngine {
     /// the same `Arc` the [`RuleStore`] validates against).
     pub fn with_catalog(mut self, catalog: Arc<AvpCatalog>) -> Self {
         self.catalog = catalog;
+        self
+    }
+
+    /// Enable `bind`/`unbind` and the notification flows by giving the engine
+    /// a [`BindingStore`] (the notification server shares the same `Arc`).
+    pub fn with_bindings(mut self, bindings: Arc<dyn BindingStore>) -> Self {
+        self.bindings = Some(bindings);
+        self
+    }
+
+    /// Set the base URL advertised to 5GC NFs as the notification callback,
+    /// exposed to rule templates as `{notification_uri}`.
+    pub fn with_notification_base(mut self, base: impl Into<String>) -> Self {
+        self.notification_base = Some(base.into());
         self
     }
 
@@ -110,6 +136,17 @@ impl TranslationEngine {
             origin_host: self.origin_host.clone(),
             origin_realm: self.origin_realm.clone(),
         };
+
+        // Built-in vars for the notification flows: the request's Session-Id
+        // is the binding key, and `{notification_uri}` is the callback the
+        // 5GC NF will invoke (Session-Id percent-encoded into the path).
+        if let (Some(base), Some(sid)) = (&self.notification_base, request.session_id()) {
+            ctx.vars.insert("binding_id".to_owned(), sid.to_owned());
+            ctx.vars.insert(
+                "notification_uri".to_owned(),
+                format!("{base}/iwf-notif/v1/{}", percent_encode_segment(sid)),
+            );
+        }
 
         for action in &rule.actions {
             match action {
@@ -171,6 +208,10 @@ impl TranslationEngine {
                             .cloned()
                     };
                     if let Some(value) = mapped {
+                        // The mapped value may itself reference variables (e.g.
+                        // Ro routes CC-Request-Type → a path suffix carrying
+                        // `{chargingRef}` loaded by a prior `bind_lookup`).
+                        let value = substitute(&value, &ctx.vars)?;
                         ctx.vars.insert(var.clone(), value);
                     }
                     // No match and no default → variable left unset; a later
@@ -209,6 +250,94 @@ impl TranslationEngine {
                         })
                         .await?;
                     ctx.response = Some(response);
+                }
+
+                Action::Bind {
+                    kind,
+                    identity,
+                    resource_json,
+                    resource_value,
+                    when,
+                } => {
+                    if !guard_passes(when.as_ref(), &ctx.vars) {
+                        continue;
+                    }
+                    let store = self.bindings.as_ref().ok_or(CoreError::UnableToComply(
+                        "bind action but no binding store configured".to_owned(),
+                    ))?;
+                    // Key the binding by the request's Session-Id — the same id
+                    // a teardown (`unbind`) presents and that `{notification_uri}`
+                    // hands the 5GC NF for server-push.
+                    let id = request
+                        .session_id()
+                        .ok_or(CoreError::MissingElement("Session-Id for bind"))?
+                        .to_owned();
+                    let resource_ref = if let Some(ptr) = resource_json {
+                        ctx.response_json()
+                            .and_then(|j| j.pointer(ptr).cloned())
+                            .and_then(|v| match v {
+                                serde_json::Value::String(s) => Some(s),
+                                other if !other.is_null() => Some(other.to_string()),
+                                _ => None,
+                            })
+                    } else if let Some(tpl) = resource_value {
+                        Some(substitute(tpl, &ctx.vars)?)
+                    } else {
+                        None
+                    };
+                    store
+                        .put(
+                            id,
+                            Binding {
+                                peer_host: request_avp_str(request, dict::AVP_ORIGIN_HOST)
+                                    .unwrap_or_default(),
+                                peer_realm: request_avp_str(request, dict::AVP_ORIGIN_REALM)
+                                    .unwrap_or_default(),
+                                identity: substitute(identity, &ctx.vars)?,
+                                session_id: request.session_id().map(str::to_owned),
+                                resource_ref,
+                                kind: kind.clone(),
+                            },
+                        )
+                        .await;
+                }
+
+                Action::BindLookup { resource_as, when } => {
+                    if !guard_passes(when.as_ref(), &ctx.vars) {
+                        continue;
+                    }
+                    let store = self.bindings.as_ref().ok_or(CoreError::UnableToComply(
+                        "bind_lookup action but no binding store configured".to_owned(),
+                    ))?;
+                    let id = request
+                        .session_id()
+                        .ok_or(CoreError::MissingElement("Session-Id for bind_lookup"))?;
+                    // Read-only: load the resource handle, keep the binding
+                    // (Ro CCR-Update needs the chargingDataRef but the session
+                    // lives on).
+                    if let Some(r) = store.get(id).await.and_then(|b| b.resource_ref) {
+                        ctx.vars.insert(resource_as.clone(), r);
+                    }
+                }
+
+                Action::Unbind { resource_as, when } => {
+                    if !guard_passes(when.as_ref(), &ctx.vars) {
+                        continue;
+                    }
+                    let store = self.bindings.as_ref().ok_or(CoreError::UnableToComply(
+                        "unbind action but no binding store configured".to_owned(),
+                    ))?;
+                    let id = request
+                        .session_id()
+                        .ok_or(CoreError::MissingElement("Session-Id for unbind"))?;
+                    let taken = store.take(id).await;
+                    // Expose the freed resource handle (appSessionId, charging
+                    // ref) so the teardown `http_request` can address the 5GC.
+                    if let (Some(var), Some(b)) = (resource_as, &taken) {
+                        if let Some(r) = &b.resource_ref {
+                            ctx.vars.insert(var.clone(), r.clone());
+                        }
+                    }
                 }
 
                 Action::MapResponse(map) => {
@@ -327,6 +456,118 @@ impl TranslationEngine {
             None => Ok(None),
         }
     }
+
+    /// Build the **originated** Diameter request for an inbound 5GC
+    /// notification (PNR/RTR/PPR/RAR/ASR) — the reverse of `translate`.
+    ///
+    /// Session-Id (freshly generated), Origin-Host/Realm (local) and
+    /// Destination-Host/Realm (the bound peer) are set automatically; the
+    /// `emit.avps` are rendered with the existing `render_avp`, sourcing from
+    /// the binding fields (`{identity}`/`{resource_ref}`/`{session_id}`/
+    /// `{peer_host}`) and the notification `body` (`from_json`/`from_body`).
+    /// Hop-by-Hop/End-to-End ids are assigned later by the peer registry.
+    pub fn build_notification(
+        &self,
+        rule: &NotificationRule,
+        binding: &Binding,
+        body: Bytes,
+    ) -> Result<Message, CoreError> {
+        let mut vars = BTreeMap::new();
+        vars.insert("identity".to_owned(), binding.identity.clone());
+        vars.insert("peer_host".to_owned(), binding.peer_host.clone());
+        if let Some(r) = &binding.resource_ref {
+            vars.insert("resource_ref".to_owned(), r.clone());
+        }
+        if let Some(s) = &binding.session_id {
+            vars.insert("session_id".to_owned(), s.clone());
+        }
+        let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
+        // Synthetic context: `render_avp` reads only vars + response (FromBody)
+        // + the json arg, never `request` or `answer()`.
+        let ctx = TranslationContext {
+            request: MessageBuilder::request(rule.emit.command, rule.emit.application).build(),
+            vars,
+            response: Some(SbiResponse { status: 200, body }),
+            origin_host: self.origin_host.clone(),
+            origin_realm: self.origin_realm.clone(),
+        };
+
+        // Rx RAR/ASR reuse the AAR session; PNR/RTR/PPR get a fresh id.
+        let session_id = match (rule.emit.reuse_session, &binding.session_id) {
+            (true, Some(sid)) => sid.clone(),
+            _ => self.generate_session_id(),
+        };
+        let mut b = MessageBuilder::request(rule.emit.command, rule.emit.application)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8(session_id))
+            .std(
+                dict::AVP_ORIGIN_HOST,
+                AvpValue::Utf8(self.origin_host.clone()),
+            )
+            .std(
+                dict::AVP_ORIGIN_REALM,
+                AvpValue::Utf8(self.origin_realm.clone()),
+            )
+            .std(
+                dict::AVP_DESTINATION_HOST,
+                AvpValue::Utf8(binding.peer_host.clone()),
+            )
+            .std(
+                dict::AVP_DESTINATION_REALM,
+                AvpValue::Utf8(binding.peer_realm.clone()),
+            );
+        for spec in &rule.emit.avps {
+            if let Some(rendered) = self.render_avp(&rule.id, spec, &ctx, json.as_ref())? {
+                b = b.avp(rendered);
+            }
+        }
+        Ok(b.build())
+    }
+
+    /// A unique Session-Id for an originated request (RFC 6733 §8.8:
+    /// `<DiameterIdentity>;<high32>;<low32>`).
+    fn generate_session_id(&self) -> String {
+        let seq = self.session_seq.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0);
+        format!("{};{now};{seq}", self.origin_host)
+    }
+}
+
+/// Whether a stateful action's `when` guard holds: no guard → always true;
+/// otherwise the named variable must be bound and equal `equals`.
+fn guard_passes(when: Option<&Guard>, vars: &BTreeMap<String, String>) -> bool {
+    match when {
+        None => true,
+        Some(g) => vars.get(&g.var).is_some_and(|v| v == &g.equals),
+    }
+}
+
+/// Read a top-level UTF-8 AVP from a request as an owned string (used to copy
+/// the peer's Origin-Host/Realm into a [`Binding`]).
+fn request_avp_str(request: &Message, code: u32) -> Option<String> {
+    request
+        .find(code, None)
+        .and_then(|a| a.as_utf8().ok())
+        .map(str::to_owned)
+}
+
+/// Percent-encode a Session-Id for use as a single URL path segment
+/// (RFC 3986 unreserved set passes through; everything else, notably the `;`
+/// separators, is `%`-escaped). Axum decodes it back to the raw Session-Id —
+/// the binding key — on the inbound notification.
+fn percent_encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Encode a string value per the AVP's catalog type. Integer kinds parse
@@ -661,6 +902,14 @@ rules:
     // SbaPort, asserting the correct Nhss path/method/operation and answer.
 
     const NHSS_RULES: &str = include_str!("../../config/rules-nhss.yaml");
+    const NHSS_DICTIONARY: &str = include_str!("../../config/dictionary.yaml");
+
+    /// The shipped rules run against the shipped dictionary — exactly as the
+    /// node loads them — so new interfaces add AVPs in one place
+    /// (`config/dictionary.yaml`), not the builtin table.
+    fn nhss_catalog() -> Arc<AvpCatalog> {
+        Arc::new(AvpCatalog::from_yaml(NHSS_DICTIONARY).expect("dictionary valid"))
+    }
 
     fn nhss_engine(status: u16, body: serde_json::Value) -> (TranslationEngine, Arc<MockSba>) {
         let sba = Arc::new(MockSba {
@@ -668,8 +917,10 @@ rules:
             body,
             seen: Mutex::new(Vec::new()),
         });
-        let store = Arc::new(RuleStore::new(
-            crate::rule::RuleSet::from_yaml(NHSS_RULES).expect("nhss rules parse"),
+        let catalog = nhss_catalog();
+        let store = Arc::new(RuleStore::with_catalog(
+            crate::rule::RuleSet::from_yaml_with(NHSS_RULES, &catalog).expect("nhss rules parse"),
+            catalog.clone(),
         ));
         let engine = TranslationEngine::new(
             store,
@@ -677,14 +928,21 @@ rules:
             sba.clone(),
             "iwf.epc.example.org",
             "epc.example.org",
-        );
+        )
+        .with_catalog(catalog)
+        // The shipped rules now `bind` and use `{notification_uri}`, so the
+        // engine needs a binding store + notification base (as the node does).
+        .with_bindings(Arc::new(MapBindings::default()))
+        .with_notification_base("http://iwf-notif.epc.example.org");
         (engine, sba)
     }
 
     #[test]
     fn nhss_rules_validate() {
-        // The shipped rule document must parse + validate (set_var, etc.).
-        crate::rule::RuleSet::from_yaml(NHSS_RULES).expect("rules-nhss.yaml valid");
+        // The shipped rule document must parse + validate against the shipped
+        // dictionary (set_var, bind, notifications, ...).
+        let catalog = nhss_catalog();
+        crate::rule::RuleSet::from_yaml_with(NHSS_RULES, &catalog).expect("rules-nhss.yaml valid");
     }
 
     #[tokio::test]
@@ -692,6 +950,7 @@ rules:
         let (engine, sba) = nhss_engine(200, serde_json::json!({"imsUserProfile": {}}));
         let sar = MessageBuilder::request(dict::CMD_SAR, dict::APP_CX)
             .ids(1, 1)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8("scscf;1;1".to_owned()))
             .tgpp(
                 dict::AVP_PUBLIC_IDENTITY,
                 AvpValue::Utf8("sip:alice@ims.example.org".to_owned()),
@@ -720,6 +979,7 @@ rules:
         let (engine, sba) = nhss_engine(200, serde_json::json!({}));
         let sar = MessageBuilder::request(dict::CMD_SAR, dict::APP_CX)
             .ids(2, 2)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8("scscf;2;2".to_owned()))
             .tgpp(
                 dict::AVP_PUBLIC_IDENTITY,
                 AvpValue::Utf8("sip:bob@ims.example.org".to_owned()),
@@ -743,6 +1003,7 @@ rules:
         let (engine, sba) = nhss_engine(200, serde_json::json!({}));
         let sar = MessageBuilder::request(dict::CMD_SAR, dict::APP_CX)
             .ids(3, 3)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8("scscf;3;3".to_owned()))
             .tgpp(
                 dict::AVP_PUBLIC_IDENTITY,
                 AvpValue::Utf8("sip:c@ims.example.org".to_owned()),
@@ -909,6 +1170,284 @@ rules:
                 .find(dict::AVP_SERVER_NAME, Some(dict::VENDOR_3GPP))
                 .and_then(|a| a.as_utf8().ok()),
             Some("sip:scscf1.ims.example.org")
+        );
+    }
+
+    #[tokio::test]
+    async fn rx_aar_binds_then_str_deletes_appsession() {
+        // Drives the shipped Rx pack: AAR creates+binds a PCF app-session,
+        // STR (same Session-Id) tears it down via the bound appSessionId.
+        let (engine, sba) = nhss_engine(200, serde_json::json!({"appSessionId": "app-77"}));
+        let aar = MessageBuilder::request(dict::CMD_AAR, dict::APP_RX)
+            .ids(1, 1)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8("pcscf;1;1".to_owned()))
+            .std(
+                dict::AVP_ORIGIN_HOST,
+                AvpValue::Utf8("pcscf.ims.example.org".to_owned()),
+            )
+            .build();
+        assert_eq!(
+            engine
+                .translate(&aar, "c")
+                .await
+                .expect("aaa")
+                .result_code(),
+            Some(dict::RC_SUCCESS)
+        );
+
+        let str_req = MessageBuilder::request(dict::CMD_STR, dict::APP_RX)
+            .ids(2, 2)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8("pcscf;1;1".to_owned()))
+            .build();
+        assert_eq!(
+            engine
+                .translate(&str_req, "c")
+                .await
+                .expect("sta")
+                .result_code(),
+            Some(dict::RC_SUCCESS)
+        );
+
+        let seen = sba.seen.lock().expect("lock");
+        assert_eq!(seen[0].path, "/npcf-policyauthorization/v1/app-sessions");
+        assert_eq!(
+            seen.last().map(|r| r.path.as_str()),
+            Some("/npcf-policyauthorization/v1/app-sessions/app-77/delete"),
+            "STR addressed the bound appSessionId"
+        );
+    }
+
+    #[tokio::test]
+    async fn ro_ccr_initial_update_terminate_charging_session() {
+        // The shipped Ro pack drives one Nchf charging session by
+        // CC-Request-Type, keyed by Session-Id: INITIAL binds the
+        // chargingDataRef, UPDATE/TERMINATION address it via the binding.
+        let (engine, sba) = nhss_engine(
+            200,
+            serde_json::json!({"chargingDataRef": "chg-1", "grantedUnit": {"ccTime": 3600}}),
+        );
+        let ccr = |num: u32, req_type: i32| {
+            MessageBuilder::request(dict::CMD_CCR, dict::APP_RO)
+                .ids(num, num)
+                .std(dict::AVP_SESSION_ID, AvpValue::Utf8("ctf;1;1".to_owned()))
+                .std(416, AvpValue::Enum(req_type)) // CC-Request-Type
+                .std(415, AvpValue::U32(num)) // CC-Request-Number
+                .build()
+        };
+
+        // INITIAL → create + bind, CCA carries the granted units.
+        let cca = engine.translate(&ccr(1, 1), "c").await.expect("cca-init");
+        assert_eq!(cca.result_code(), Some(dict::RC_SUCCESS));
+        let mscc = cca
+            .find(456, None)
+            .expect("MSCC")
+            .as_grouped()
+            .expect("grouped");
+        let gsu = mscc
+            .iter()
+            .find(|a| a.code == 431)
+            .expect("Granted-Service-Unit")
+            .as_grouped()
+            .expect("grouped");
+        assert_eq!(
+            gsu.iter()
+                .find(|a| a.code == 420)
+                .and_then(|a| a.as_u32().ok()),
+            Some(3600),
+            "CC-Time rendered from the Nchf grant"
+        );
+
+        // UPDATE → addresses the bound chargingDataRef.
+        engine.translate(&ccr(2, 2), "c").await.expect("cca-update");
+        // TERMINATION → addresses + frees it.
+        engine.translate(&ccr(3, 3), "c").await.expect("cca-term");
+
+        let paths: Vec<String> = sba
+            .seen
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        assert_eq!(paths[0], "/nchf-convergedcharging/v1/chargingdata");
+        assert_eq!(
+            paths[1],
+            "/nchf-convergedcharging/v1/chargingdata/chg-1/update"
+        );
+        assert_eq!(
+            paths[2],
+            "/nchf-convergedcharging/v1/chargingdata/chg-1/release"
+        );
+    }
+
+    // ---- Phase 2: notifications + bindings ------------------------------
+
+    use iwf_core::ports::{Binding, BindingStore};
+
+    /// In-memory binding store for engine tests.
+    #[derive(Default)]
+    struct MapBindings(Mutex<std::collections::HashMap<String, Binding>>);
+
+    #[async_trait]
+    impl BindingStore for MapBindings {
+        async fn put(&self, id: String, b: Binding) {
+            self.0.lock().expect("lock").insert(id, b);
+        }
+        async fn get(&self, id: &str) -> Option<Binding> {
+            self.0.lock().expect("lock").get(id).cloned()
+        }
+        async fn take(&self, id: &str) -> Option<Binding> {
+            self.0.lock().expect("lock").remove(id)
+        }
+    }
+
+    fn plain_engine() -> TranslationEngine {
+        let store = Arc::new(RuleStore::new(
+            crate::rule::RuleSet::from_yaml("rules: []").expect("empty rules"),
+        ));
+        TranslationEngine::new(
+            store,
+            PluginRegistry::with_builtins(),
+            Arc::new(MockSba {
+                status: 200,
+                body: serde_json::json!({}),
+                seen: Mutex::new(Vec::new()),
+            }),
+            "iwf.epc.example.org",
+            "epc.example.org",
+        )
+    }
+
+    #[test]
+    fn build_notification_renders_declarative_request() {
+        // A PNR notification rule mapping the subscriber identity from the
+        // binding and the changed data straight from the notification body.
+        let set = crate::rule::RuleSet::from_yaml(
+            r#"
+rules: []
+notifications:
+  - id: sh_pnr
+    bind_kind: sh
+    emit:
+      command: 309
+      application: 16777217
+      avps:
+        - { avp: User-Name, value: "{identity}" }
+        - { avp: User-Data, from_body: true }
+"#,
+        )
+        .expect("parse notifications");
+        let rule = &set.notifications[0];
+        let engine = plain_engine();
+        let binding = Binding {
+            peer_host: "as.ims.example.org".to_owned(),
+            peer_realm: "ims.example.org".to_owned(),
+            identity: "sip:alice@ims.example.org".to_owned(),
+            session_id: Some("snr;1;1".to_owned()),
+            resource_ref: None,
+            kind: "sh".to_owned(),
+        };
+        let body = Bytes::from(r#"{"changed":"profile"}"#);
+        let pnr = engine
+            .build_notification(rule, &binding, body.clone())
+            .expect("build pnr");
+
+        assert!(pnr.header.flags.request());
+        assert_eq!(pnr.header.command, dict::CMD_PNR);
+        assert_eq!(pnr.header.application, dict::APP_SH);
+        // Destination routed to the bound peer; fresh Session-Id; local origin.
+        assert_eq!(
+            pnr.find(dict::AVP_DESTINATION_HOST, None)
+                .and_then(|a| a.as_utf8().ok()),
+            Some("as.ims.example.org")
+        );
+        assert!(pnr.session_id().is_some_and(|s| s.starts_with("iwf.epc")));
+        assert_eq!(
+            pnr.find(dict::AVP_USER_NAME, None)
+                .and_then(|a| a.as_utf8().ok()),
+            Some("sip:alice@ims.example.org")
+        );
+        assert_eq!(
+            pnr.find(dict::AVP_USER_DATA, Some(dict::VENDOR_3GPP))
+                .map(|a| a.data.clone()),
+            Some(body)
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_then_unbind_round_trips_through_store() {
+        let store = Arc::new(MapBindings::default());
+        // A "subscribe-like" rule: bind after a created resource, keyed by the
+        // request Session-Id, recording the appSessionId from the response.
+        let rules = r#"
+rules:
+  - id: rx_aar
+    trigger: { diameter_application: 16777236, command_code: 265 }
+    actions:
+      - http_request: { method: POST, nf_type: PCF, path: "/npcf-policyauthorization/v1/app-sessions" }
+      - bind: { kind: rx, identity: "alice", resource_json: "/appSessionId" }
+      - map_response: { default: { result_code: 2001 } }
+    version: v1
+  - id: rx_str
+    trigger: { diameter_application: 16777236, command_code: 275 }
+    actions:
+      - unbind: { resource_as: appSessionId }
+      - http_request: { method: POST, nf_type: PCF, path: "/npcf-policyauthorization/v1/app-sessions/{appSessionId}/delete" }
+      - map_response: { default: { result_code: 2001 } }
+    version: v1
+"#;
+        let sba = Arc::new(MockSba {
+            status: 200,
+            body: serde_json::json!({ "appSessionId": "app-123" }),
+            seen: Mutex::new(Vec::new()),
+        });
+        let engine = TranslationEngine::new(
+            Arc::new(RuleStore::new(
+                crate::rule::RuleSet::from_yaml(rules).expect("rules"),
+            )),
+            PluginRegistry::with_builtins(),
+            sba.clone(),
+            "iwf.epc.example.org",
+            "epc.example.org",
+        )
+        .with_bindings(store.clone());
+
+        let aar = MessageBuilder::request(265, 16_777_236)
+            .ids(1, 1)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8("pcscf;9;9".to_owned()))
+            .std(
+                dict::AVP_ORIGIN_HOST,
+                AvpValue::Utf8("pcscf.ims.example.org".to_owned()),
+            )
+            .std(
+                dict::AVP_ORIGIN_REALM,
+                AvpValue::Utf8("ims.example.org".to_owned()),
+            )
+            .build();
+        engine.translate(&aar, "c").await.expect("aar");
+
+        // Bound under the AAR Session-Id, with the appSessionId from the PCF.
+        let bound = store.get("pcscf;9;9").await.expect("binding");
+        assert_eq!(bound.resource_ref.as_deref(), Some("app-123"));
+        assert_eq!(bound.peer_host, "pcscf.ims.example.org");
+
+        // STR with the same Session-Id deletes the bound app-session, then the
+        // binding is gone.
+        let str_req = MessageBuilder::request(275, 16_777_236)
+            .ids(2, 2)
+            .std(dict::AVP_SESSION_ID, AvpValue::Utf8("pcscf;9;9".to_owned()))
+            .std(
+                dict::AVP_ORIGIN_HOST,
+                AvpValue::Utf8("pcscf.ims.example.org".to_owned()),
+            )
+            .build();
+        engine.translate(&str_req, "c").await.expect("str");
+        assert!(store.get("pcscf;9;9").await.is_none(), "binding removed");
+        let seen = sba.seen.lock().expect("lock");
+        assert_eq!(
+            seen.last().map(|r| r.path.as_str()),
+            Some("/npcf-policyauthorization/v1/app-sessions/app-123/delete"),
+            "teardown addressed the bound resource"
         );
     }
 }

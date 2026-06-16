@@ -25,6 +25,7 @@ futures = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 iwf-benchmark = { path = "../iwf-benchmark" }

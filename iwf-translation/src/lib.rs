@@ -28,4 +28,6 @@ pub mod rule;
 pub use catalog::{AvpCatalog, AvpDef, AvpKind};
 pub use engine::TranslationEngine;
 pub use plugin::{PluginRegistry, TranslationPlugin};
-pub use rule::{Action, Rule, RuleSet, RuleStore, Trigger};
+pub use rule::{
+    Action, EmitSpec, Guard, NotificationMatch, NotificationRule, Rule, RuleSet, RuleStore, Trigger,
+};
