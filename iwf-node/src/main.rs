@@ -126,13 +126,31 @@ async fn run() {
         Err(e) => fatal("metrics registry", e),
     };
 
+    // ---- AVP dictionary (per-interface catalog; builtin when unset) -------
+    let catalog = match &config.dictionary_file {
+        Some(path) => {
+            let text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => fatal("reading dictionary file", e),
+            };
+            match iwf_translation::AvpCatalog::from_yaml(&text) {
+                Ok(c) => {
+                    tracing::info!(path = %path.display(), avps = c.len(), "AVP dictionary loaded");
+                    Arc::new(c)
+                }
+                Err(e) => fatal("parsing dictionary file", e),
+            }
+        }
+        None => Arc::new(iwf_translation::AvpCatalog::builtin()),
+    };
+
     // ---- translation rules (hot-reload via admin PUT /admin/v1/rules) ----
     let rules_text = match std::fs::read_to_string(&config.rules_file) {
         Ok(t) => t,
         Err(e) => fatal("reading rules file", e),
     };
-    let rules = match iwf_translation::rule::RuleSet::from_yaml(&rules_text) {
-        Ok(set) => Arc::new(RuleStore::new(set)),
+    let rules = match iwf_translation::rule::RuleSet::from_yaml_with(&rules_text, &catalog) {
+        Ok(set) => Arc::new(RuleStore::with_catalog(set, catalog.clone())),
         Err(e) => fatal("parsing rules file", e),
     };
 
@@ -187,13 +205,16 @@ async fn run() {
         metrics: metrics.clone(),
     });
 
-    let engine = Arc::new(TranslationEngine::new(
-        rules.clone(),
-        PluginRegistry::with_builtins(),
-        sba,
-        config.diameter.origin_host.clone(),
-        config.diameter.origin_realm.clone(),
-    ));
+    let engine = Arc::new(
+        TranslationEngine::new(
+            rules.clone(),
+            PluginRegistry::with_builtins(),
+            sba,
+            config.diameter.origin_host.clone(),
+            config.diameter.origin_realm.clone(),
+        )
+        .with_catalog(catalog),
+    );
 
     // ---- NRF registration / heartbeat --------------------------------------
     let shutdown = Arc::new(tokio::sync::Notify::new());

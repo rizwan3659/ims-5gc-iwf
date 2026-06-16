@@ -182,3 +182,76 @@ pub mod disconnect_cause {
     /// DO_NOT_WANT_TO_TALK_TO_YOU — administrative removal.
     pub const DO_NOT_WANT_TO_TALK_TO_YOU: u32 = 2;
 }
+
+/// Server-Assignment-Type values (TS 29.229 §6.3.15). The IWF maps these onto
+/// the Nhss_imsUECM operation for an SAR (TS 29.562 §6): REGISTRATION /
+/// RE_REGISTRATION → UECM Registration; the deregistration family → UECM
+/// Deregistration; the rest → UECM Update. (Used by the `set_var` rule action.)
+pub mod server_assignment_type {
+    /// NO_ASSIGNMENT.
+    pub const NO_ASSIGNMENT: i32 = 0;
+    /// REGISTRATION.
+    pub const REGISTRATION: i32 = 1;
+    /// RE_REGISTRATION.
+    pub const RE_REGISTRATION: i32 = 2;
+    /// UNREGISTERED_USER.
+    pub const UNREGISTERED_USER: i32 = 3;
+    /// TIMEOUT_DEREGISTRATION.
+    pub const TIMEOUT_DEREGISTRATION: i32 = 4;
+    /// USER_DEREGISTRATION.
+    pub const USER_DEREGISTRATION: i32 = 5;
+    /// TIMEOUT_DEREGISTRATION_STORE_SERVER_NAME.
+    pub const TIMEOUT_DEREGISTRATION_STORE_SERVER_NAME: i32 = 6;
+    /// USER_DEREGISTRATION_STORE_SERVER_NAME.
+    pub const USER_DEREGISTRATION_STORE_SERVER_NAME: i32 = 7;
+    /// ADMINISTRATIVE_DEREGISTRATION.
+    pub const ADMINISTRATIVE_DEREGISTRATION: i32 = 8;
+    /// AUTHENTICATION_FAILURE.
+    pub const AUTHENTICATION_FAILURE: i32 = 9;
+    /// AUTHENTICATION_TIMEOUT.
+    pub const AUTHENTICATION_TIMEOUT: i32 = 10;
+    /// DEREGISTRATION_TOO_MUCH_DATA.
+    pub const DEREGISTRATION_TOO_MUCH_DATA: i32 = 11;
+}
+
+/// Data-Reference values (TS 29.329 §6.3.4) — select the Sh data item and,
+/// per TS 29.562 §6, the Nhss_imsSDM Get resource (the value → resource
+/// mapping ships as a `set_var` table in `config/rules-nhss.yaml`).
+pub mod data_reference {
+    /// RepositoryData.
+    pub const REPOSITORY_DATA: i32 = 0;
+    /// IMSPublicIdentity.
+    pub const IMS_PUBLIC_IDENTITY: i32 = 10;
+    /// IMSUserState.
+    pub const IMS_USER_STATE: i32 = 11;
+    /// S-CSCFName.
+    pub const SCSCF_NAME: i32 = 12;
+    /// InitialFilterCriteria.
+    pub const INITIAL_FILTER_CRITERIA: i32 = 13;
+    /// LocationInformation.
+    pub const LOCATION_INFORMATION: i32 = 14;
+    /// UserState.
+    pub const USER_STATE: i32 = 15;
+    /// ChargingInformation.
+    pub const CHARGING_INFORMATION: i32 = 16;
+    /// MSISDN.
+    pub const MSISDN: i32 = 17;
+    /// PSIActivation.
+    pub const PSI_ACTIVATION: i32 = 18;
+    /// DSAI.
+    pub const DSAI: i32 = 19;
+    /// ServiceLevelTraceInfo.
+    pub const SERVICE_LEVEL_TRACE_INFO: i32 = 21;
+    /// IPAddressSecureBindingInformation.
+    pub const IP_ADDRESS_SECURE_BINDING_INFORMATION: i32 = 22;
+    /// TADSInformation.
+    pub const TADS_INFORMATION: i32 = 23;
+    /// STN-SR.
+    pub const STN_SR: i32 = 24;
+    /// UE-SRVCC-Capability.
+    pub const UE_SRVCC_CAPABILITY: i32 = 25;
+    /// CSRN.
+    pub const CSRN: i32 = 26;
+    /// ReferenceLocationInformation.
+    pub const REFERENCE_LOCATION_INFORMATION: i32 = 27;
+}

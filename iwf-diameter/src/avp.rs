@@ -284,6 +284,16 @@ pub fn avp(code: u32, value: AvpValue) -> Avp {
     }
 }
 
+/// Build a vendor-specific AVP for an arbitrary vendor with V+M bits.
+pub fn avp_vendor(code: u32, vendor_id: u32, value: AvpValue) -> Avp {
+    Avp {
+        code,
+        flags: AvpFlags(AvpFlags::VENDOR | AvpFlags::MANDATORY),
+        vendor_id: Some(vendor_id),
+        data: value.into_bytes(),
+    }
+}
+
 /// Build a 3GPP vendor-specific AVP (Vendor-Id 10415) with V+M bits.
 pub fn avp_3gpp(code: u32, value: AvpValue) -> Avp {
     Avp {

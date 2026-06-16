@@ -151,6 +151,10 @@ pub struct Config {
     pub admin: AdminConfig,
     /// Translation rule document path.
     pub rules_file: PathBuf,
+    /// AVP dictionary document path (per-interface AVP catalog). Unset →
+    /// the builtin Cx/Sh table compiled into `iwf-translation`.
+    #[serde(default)]
+    pub dictionary_file: Option<PathBuf>,
     /// TLS material (optional: plain TCP inside a service mesh).
     #[serde(default)]
     pub tls: Option<TlsConfig>,

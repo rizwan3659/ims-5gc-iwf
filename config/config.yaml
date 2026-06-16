@@ -23,6 +23,10 @@ admin:
 
 rules_file: "/etc/iwf/rules.yaml"
 
+# AVP dictionary (per-interface name → code/vendor/type catalog used by the
+# rule DSL; see config/dictionary.yaml). Unset → builtin Cx/Sh table.
+# dictionary_file: "/etc/iwf/dictionary.yaml"
+
 # tls:                       # enable for direct (non-mesh) mTLS
 #   cert: /etc/iwf/tls/tls.crt
 #   key: /etc/iwf/tls/tls.key
