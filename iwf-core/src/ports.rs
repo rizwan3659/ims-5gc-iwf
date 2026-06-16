@@ -110,3 +110,50 @@ pub trait TokenProvider: Send + Sync {
     /// A currently-valid bearer token for the given target NF type/scope.
     async fn bearer_token(&self, target: NfType) -> Result<String, CoreError>;
 }
+
+/// A stateful association between a Diameter session and a 5GC resource,
+/// created by a forward flow and consulted/torn down by a later one.
+///
+/// One type serves every interface that needs server-push or session
+/// teardown — keyed by `kind`:
+/// - **sh**: an Sh `SNR` subscription → the AS to route a `PNR` back to.
+/// - **rx**: an Rx `AAR` → the Npcf app-session id an `STR` must delete and
+///   the AF a `RAR`/`ASR` notifies.
+/// - **ro**: an Ro initial `CCR` → the Nchf charging resource later
+///   `CCR-Update`/`Terminate` reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    /// Diameter Origin-Host of the peer to originate back to (AS / P-CSCF /
+    /// S-CSCF). The routing key into the peer registry.
+    pub peer_host: String,
+    /// Origin-Realm of that peer (Destination-Realm of originated requests).
+    pub peer_realm: String,
+    /// Subscriber/user identity carried in the originated request
+    /// (User-Identity / Public-Identity / MSISDN).
+    pub identity: String,
+    /// The originating request's Session-Id, when the originated request must
+    /// reuse it (e.g. Rx RAR shares the AAR session).
+    pub session_id: Option<String>,
+    /// The 5GC resource handle this binding owns (Npcf appSessionId, Nchf
+    /// charging resource id, Nhss subscription id) — used to address the
+    /// follow-up SBI call.
+    pub resource_ref: Option<String>,
+    /// Binding family (sh / rx / ro), also the notification route segment.
+    pub kind: String,
+}
+
+/// Port: hold [`Binding`]s for the lifetime of a Diameter session.
+///
+/// The engine `put`s on a successful forward flow and `take`s on teardown;
+/// the notification server `get`s to route an inbound NF event. The default
+/// implementation is in-memory (lost on restart — the peer re-subscribes);
+/// the port leaves room for a shared/persistent backend.
+#[async_trait]
+pub trait BindingStore: Send + Sync {
+    /// Record (or replace) the binding under `id`.
+    async fn put(&self, id: String, binding: Binding);
+    /// Look up a binding without removing it (notification routing).
+    async fn get(&self, id: &str) -> Option<Binding>;
+    /// Remove and return a binding (session teardown / undeliverable push).
+    async fn take(&self, id: &str) -> Option<Binding>;
+}

@@ -51,7 +51,38 @@ interfaces:
     application: 16777217
     avps:
       - { name: User-Name,       code: 1,                  type: UTF8String }
+      - { name: User-Identity,   code: 700, vendor: 10415, type: Grouped }
       - { name: User-Data,       code: 606, vendor: 10415, type: OctetString }
       - { name: MSISDN,          code: 701, vendor: 10415, type: OctetString }
       - { name: Data-Reference,  code: 703, vendor: 10415, type: Enumerated }
       - { name: Subs-Req-Type,   code: 705, vendor: 10415, type: Enumerated }
+      - { name: Expiry-Time,     code: 709, vendor: 10415, type: OctetString }
+
+  rx:                                # TS 29.214 (P-CSCF/AF <-> PCF, Npcf_PolicyAuthorization)
+    application: 16777236
+    avps:
+      - { name: Auth-Application-Id,        code: 258,                type: Unsigned32 }
+      - { name: Re-Auth-Request-Type,       code: 285,                type: Enumerated }
+      - { name: Termination-Cause,          code: 295,                type: Enumerated }
+      - { name: Framed-IP-Address,          code: 8,                  type: OctetString }
+      - { name: Called-Station-Id,          code: 30,                 type: UTF8String }
+      - { name: Abort-Cause,                code: 500, vendor: 10415, type: Enumerated }
+      - { name: AF-Application-Identifier,  code: 504, vendor: 10415, type: OctetString }
+      - { name: AF-Charging-Identifier,     code: 505, vendor: 10415, type: OctetString }
+      - { name: Specific-Action,            code: 513, vendor: 10415, type: Enumerated }
+      - { name: Media-Component-Description, code: 517, vendor: 10415, type: Grouped }
+
+  ro:                                # TS 32.299 / RFC 4006 (CTF <-> CHF, Nchf_ConvergedCharging)
+    application: 4
+    avps:
+      - { name: CC-Request-Type,            code: 416, type: Enumerated }
+      - { name: CC-Request-Number,          code: 415, type: Unsigned32 }
+      - { name: Service-Context-Id,         code: 461, type: UTF8String }
+      - { name: Subscription-Id,            code: 443, type: Grouped }
+      - { name: Subscription-Id-Type,       code: 450, type: Enumerated }
+      - { name: Subscription-Id-Data,       code: 444, type: UTF8String }
+      - { name: Multiple-Services-Credit-Control, code: 456, type: Grouped }
+      - { name: Used-Service-Unit,          code: 446, type: Grouped }
+      - { name: Granted-Service-Unit,       code: 431, type: Grouped }
+      - { name: CC-Time,                    code: 420, type: Unsigned32 }
+      - { name: CC-Total-Octets,            code: 421, type: Unsigned64 }

@@ -54,9 +54,12 @@ Load test: `cargo run --release -p iwf-benchmark --bin loadgen -- host:3868
    (Istio overlay included). Wiring `tokio-rustls` into
    `transport::read_frame`'s generic stream and a rustls hyper connector is
    the next increment.
-2. **Outbound Diameter request origination** (network-initiated RTR/PPR/PNR
-   toward IMS): the session table, routing and FSM support it; the trigger
-   path (5GC notification → Diameter request) is not wired.
+2. ~~**Outbound Diameter request origination** (network-initiated RTR/PPR/PNR
+   toward IMS)~~ — **done (Phase 2).** The IWF originates Diameter into OPEN
+   peer connections (`iwf-node/src/peer_registry.rs`), driven by an inbound
+   5GC notification callback server (`notification.rs`) and a declarative
+   `notifications:` rule section. Covers Sh PNR, Cx RTR/PPR, Rx RAR/ASR; see
+   ADR-0006.
 3. **NRF status-notification subscriptions** — cache invalidation is
    TTL/poll + failure-driven today (`NFStatusSubscribe` callback endpoint
    not implemented).
@@ -69,7 +72,11 @@ Load test: `cargo run --release -p iwf-benchmark --bin loadgen -- host:3868
 6. **Object pools for message structs** — current hot path is 2 allocations
    per transaction (frame in, answer out), measured ≪ the latency budget;
    pooling is prepared for but not justified by profiling yet.
-7. **Sh SNR/PNR subscription state, Dx/SWx/Zh full command sets** — routing
-   and dictionary entries exist; rules ship for the mandated table only.
-8. **PCF flows** — NF type, discovery and client support exist; no default
-   rules target PCF yet.
+7. ~~**Sh SNR/PNR subscription state**~~ — **done (Phase 2)** via the binding
+   store + `bind`/`unbind` rule actions. **Dx/SWx/Zh full command sets** —
+   routing and dictionary entries exist; rules ship for the mandated table.
+8. ~~**PCF flows**~~ / **CHF flows** — **done (Phase 2):** Rx (AAR/STR →
+   `Npcf_PolicyAuthorization`) and Ro (CCR → `Nchf_ConvergedCharging`) ship as
+   declarative rule packs in `config/rules-nhss.yaml`; `NfType::Chf` added.
+   Driven full-node over real Diameter against a multi-NF discovery mock
+   (`all_interfaces_end_to_end`).

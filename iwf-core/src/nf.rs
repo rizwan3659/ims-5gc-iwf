@@ -23,6 +23,9 @@ pub enum NfType {
     /// (TS 29.562: Nhss_imsUECM / Nhss_imsSDM / Nhss_imsUEAU). This is the
     /// canonical producer for IMS interworking (Cx/Sh → Nhss).
     Hss,
+    /// Charging Function exposing Nchf_ConvergedCharging
+    /// (TS 32.290/32.291); the Ro (online charging) interworking target.
+    Chf,
 }
 
 impl NfType {
@@ -36,6 +39,7 @@ impl NfType {
             NfType::Pcf => "PCF",
             NfType::Nrf => "NRF",
             NfType::Hss => "HSS",
+            NfType::Chf => "CHF",
         }
     }
 }
@@ -58,6 +62,7 @@ impl std::str::FromStr for NfType {
             "PCF" => Ok(NfType::Pcf),
             "NRF" => Ok(NfType::Nrf),
             "HSS" => Ok(NfType::Hss),
+            "CHF" => Ok(NfType::Chf),
             _ => Err(crate::error::CoreError::MissingElement("known NF type")),
         }
     }
