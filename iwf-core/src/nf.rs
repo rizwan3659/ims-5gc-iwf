@@ -19,6 +19,10 @@ pub enum NfType {
     Pcf,
     /// NF Repository Function (Nnrf, TS 29.510).
     Nrf,
+    /// Home Subscriber Server exposing the Nhss IMS services
+    /// (TS 29.562: Nhss_imsUECM / Nhss_imsSDM / Nhss_imsUEAU). This is the
+    /// canonical producer for IMS interworking (Cx/Sh → Nhss).
+    Hss,
 }
 
 impl NfType {
@@ -31,6 +35,7 @@ impl NfType {
             NfType::Amf => "AMF",
             NfType::Pcf => "PCF",
             NfType::Nrf => "NRF",
+            NfType::Hss => "HSS",
         }
     }
 }
@@ -52,6 +57,7 @@ impl std::str::FromStr for NfType {
             "AMF" => Ok(NfType::Amf),
             "PCF" => Ok(NfType::Pcf),
             "NRF" => Ok(NfType::Nrf),
+            "HSS" => Ok(NfType::Hss),
             _ => Err(crate::error::CoreError::MissingElement("known NF type")),
         }
     }

@@ -1,0 +1,219 @@
+# CDOT-iwf translation rules — IMS HSS profile (3GPP TS 29.562, Rel-19).
+#
+# Maps IMS Diameter Cx/Sh commands onto the Nhss IMS services produced by a
+# 5G HSS: Nhss_imsUECM, Nhss_imsSDM, Nhss_imsUEAU. Target NF type = HSS
+# (discovered via NRF with target-nf-type=HSS).
+#
+# This interface is **fully declarative**: AVP names resolve through the
+# dictionary (config/dictionary.yaml or the builtin catalog) and every
+# map_response value is an inline answer spec — result_code /
+# experimental_result plus JSON→AVP mappings — rendered by the engine.
+# No compiled plugin is involved, so retargeting a field or adding an
+# operation is an edit to this file (hot-reloadable via the admin API).
+#
+# Phase 1 (this file): terminating request/response flows — UAR, LIR, SAR,
+# MAR, UDR, PUR. The notification/origination flows (SNR, PNR,
+# Deregistration-Notification) require outbound Diameter + a notification
+# callback server and are deferred to Phase 2.
+#
+# DSL notes:
+#   * {imsUeId} here is the IMPI (User-Name) or IMPU (Public-Identity) per the
+#     operation; we extract both and use the spec-appropriate one.
+#   * set_var maps an Enumerated AVP (Server-Assignment-Type, Data-Reference)
+#     to a path segment, giving conditional routing without branching.
+#   * Answer specs: `from_json` is an RFC 6901 pointer into the last HTTP
+#     response; `from_body` echoes the raw body; `concat` + `decode: hex`
+#     assembles binary values (RAND‖AUTN); `group` nests grouped AVPs.
+#     Missing optional sources skip the AVP; `required: true` fails the
+#     transaction instead (→ 5012).
+#
+# TS 29.562 §5 mapping table implemented:
+#   UAR  -> UECM_Authorize + SDM_Get(scscf-capabilities)
+#   LIR  -> UECM_Authorize + SDM_Get(server-name)
+#   SAR  -> UECM_{Registration|Deregistration|Update} + SDM_Get(profile-data)
+#   MAR  -> UECM_Registration + UEAU_Get
+#   UDR  -> SDM_Get(<by Data-Reference>)
+#   PUR  -> SDM_Update
+
+rules:
+  # ---- 1. Cx UAR -> UECM_Authorize + SDM_Get(scscf-capabilities) ----------
+  - id: cx_uar_nhss
+    trigger: { diameter_application: 16777216, command_code: 300 }   # Cx UAR
+    actions:
+      - extract: { avp: "Public-Identity", as: imsUeId }
+      - extract: { avp: "User-Name", as: impi, required: false }
+      - http_request:
+          method: POST
+          nf_type: HSS
+          path: "/nhss-ims-uecm/v1/{imsUeId}/authorize"
+          body:
+            authorizationType: "REGISTRATION"
+      - http_request:
+          method: GET
+          nf_type: HSS
+          path: "/nhss-ims-sdm/v1/{imsUeId}/ims-data/location-data/scscf-capabilities"
+      - map_response:
+          200:
+            result_code: 2001
+            avps:
+              - { avp: Server-Name, from_json: "/scscfName" }   # when assigned
+          404: { experimental_result: 5001 }                    # USER_UNKNOWN
+          default: { result_code: 5012 }                        # UNABLE_TO_COMPLY
+    version: "ts29562-r19"
+
+  # ---- 2. Cx LIR -> UECM_Authorize + SDM_Get(server-name) -----------------
+  - id: cx_lir_nhss
+    trigger: { diameter_application: 16777216, command_code: 302 }   # Cx LIR
+    actions:
+      - extract: { avp: "Public-Identity", as: imsUeId }
+      - http_request:
+          method: GET
+          nf_type: HSS
+          path: "/nhss-ims-sdm/v1/{imsUeId}/ims-data/location-data/server-name"
+      - map_response:
+          200:
+            result_code: 2001
+            avps:
+              - { avp: Server-Name, from_json: "/serverName", required: true }
+          404: { experimental_result: 5001 }
+          default: { result_code: 5012 }
+    version: "ts29562-r19"
+
+  # ---- 3. Cx SAR -> UECM_{Registration|Dereg|Update} + SDM_Get(profile) ---
+  #   Server-Assignment-Type (AVP 614) selects the UECM operation.
+  - id: cx_sar_nhss
+    trigger: { diameter_application: 16777216, command_code: 301 }   # Cx SAR
+    actions:
+      - extract: { avp: "Public-Identity", as: imsUeId }
+      - extract: { avp: "Server-Assignment-Type", as: sat, required: false }
+      - extract: { avp: "Server-Name", as: scscfRaw, required: false }
+      # Guarantee scscfName is always bound (passthrough when present).
+      - set_var: { from: scscfRaw, as: scscfName, default: "unknown" }
+      - set_var:
+          from: sat
+          as: uecmOp
+          map:
+            "1": "registration"      # REGISTRATION
+            "2": "registration"      # RE_REGISTRATION
+            "3": "registration"      # UNREGISTERED_USER
+            "4": "deregistration"    # TIMEOUT_DEREGISTRATION
+            "5": "deregistration"    # USER_DEREGISTRATION
+            "6": "deregistration"
+            "7": "deregistration"
+            "8": "deregistration"    # ADMINISTRATIVE_DEREGISTRATION
+          default: "update"
+      - http_request:
+          method: PUT
+          nf_type: HSS
+          path: "/nhss-ims-uecm/v1/{imsUeId}/{uecmOp}"
+          body:
+            scscfName: "{scscfName}"
+      - http_request:
+          method: GET
+          nf_type: HSS
+          path: "/nhss-ims-sdm/v1/{imsUeId}/ims-data/profile-data"
+      - map_response:
+          200:
+            result_code: 2001
+            avps:
+              - { avp: User-Data, from_body: true }             # IMS user profile
+          404: { experimental_result: 5001 }
+          default: { result_code: 5012 }
+    version: "ts29562-r19"
+
+  # ---- 4. Cx MAR -> UECM_Registration + UEAU_Get --------------------------
+  #   The MAA SIP-Auth-Data-Item is assembled from the Av5gAka hex fields:
+  #   SIP-Authenticate = RAND‖AUTN, SIP-Authorization = XRES* (TS 29.229
+  #   §6.3.10/§6.3.11 ← TS 29.562 / TS 33.501).
+  - id: cx_mar_nhss
+    trigger: { diameter_application: 16777216, command_code: 303 }   # Cx MAR
+    actions:
+      - extract: { avp: "User-Name", as: imsUeId }                   # IMPI
+      - http_request:
+          method: POST
+          nf_type: HSS
+          path: "/nhss-ims-ueau/v1/{imsUeId}/ims-aka/generate-av"
+          body:
+            servingNetworkName: "ims"
+      - map_response:
+          200: &maa_success
+            result_code: 2001
+            avps:
+              - { avp: SIP-Number-Auth-Items, value: "1" }
+              - avp: SIP-Auth-Data-Item
+                required: true
+                group:
+                  - { avp: SIP-Authentication-Scheme, value: "Digest-AKAv1-MD5" }
+                  - avp: SIP-Authenticate
+                    required: true
+                    concat:
+                      - { from_json: "/av5gAka/rand", decode: hex }
+                      - { from_json: "/av5gAka/autn", decode: hex }
+                  - avp: SIP-Authorization
+                    required: true
+                    from_json: "/av5gAka/xresStar"
+                    decode: hex
+                  - { avp: Confidentiality-Key, from_json: "/av5gAka/ckPrime", decode: hex }
+                  - { avp: Integrity-Key, from_json: "/av5gAka/ikPrime", decode: hex }
+          201: *maa_success
+          404: { experimental_result: 5001 }
+          default: { result_code: 5012 }
+    version: "ts29562-r19"
+
+  # ---- 5. Sh UDR -> SDM_Get(<resource by Data-Reference>) -----------------
+  #   Data-Reference (AVP 703) selects the SDM_Get resource segment.
+  - id: sh_udr_nhss
+    trigger: { diameter_application: 16777217, command_code: 306 }   # Sh UDR
+    actions:
+      - extract: { avp: "User-Name", as: imsUeId, required: false }
+      - extract: { avp: "Data-Reference", as: dref, required: false }
+      - set_var:
+          from: dref
+          as: sdmRes
+          map:
+            "0": "repository-data"
+            "10": "identities/ims-associated-identities"
+            "11": "ims-data/registration-status"
+            "12": "ims-data/location-data/server-name"
+            "13": "ims-data/profile-data/ifcs"
+            "14": "access-data/ps-domain/location-data"
+            "15": "access-data/ps-domain/user-state"
+            "16": "ims-data/profile-data/charging-info"
+            "17": "identities/msisdns"
+            "23": "access-data/ps-domain/tads-info"
+            "24": "srvcc-data"
+          default: "ims-data/profile-data"
+      - http_request:
+          method: GET
+          nf_type: HSS
+          path: "/nhss-ims-sdm/v1/{imsUeId}/{sdmRes}"
+      - map_response:
+          200:
+            result_code: 2001
+            avps:
+              - { avp: User-Data, from_body: true }
+          404: { experimental_result: 5001 }
+          default: { result_code: 5012 }
+    version: "ts29562-r19"
+
+  # ---- 6. Sh PUR -> SDM_Update --------------------------------------------
+  - id: sh_pur_nhss
+    trigger: { diameter_application: 16777217, command_code: 307 }   # Sh PUR
+    actions:
+      - extract: { avp: "User-Name", as: imsUeId, required: false }
+      - extract: { avp: "User-Data", as: userDataRaw, required: false }
+      # Guarantee userData is always bound (passthrough when present).
+      - set_var: { from: userDataRaw, as: userData, default: "" }
+      - http_request:
+          method: PUT
+          nf_type: HSS
+          path: "/nhss-ims-sdm/v1/{imsUeId}/repository-data"
+          body:
+            repositoryData: "{userData}"
+      - map_response:
+          200: { result_code: 2001 }
+          201: { result_code: 2001 }
+          204: { result_code: 2001 }
+          404: { experimental_result: 5001 }
+          default: { result_code: 5012 }
+    version: "ts29562-r19"

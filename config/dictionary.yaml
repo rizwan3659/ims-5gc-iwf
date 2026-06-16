@@ -1,0 +1,57 @@
+# CDOT-iwf AVP dictionary — resolves the AVP names used in rule documents
+# to wire definitions (code, vendor, Diameter type).
+#
+# Loaded via `dictionary_file` in config.yaml. Interface sections (base, cx,
+# sh, …) are organizational; AVP identity is (vendor, code) and all sections
+# merge into one namespace — the same name may repeat across sections only
+# with an identical definition. Supporting a new interface or AVP is an edit
+# here plus rules: no recompile.
+#
+# `type` is the Diameter base type and drives both `extract` (integer AVPs
+# render as decimal strings for set_var tables) and inline answer encoding:
+#   UTF8String | OctetString | Unsigned32 | Unsigned64 | Enumerated | Grouped
+
+interfaces:
+  base:
+    description: "RFC 6733 base protocol"
+    avps:
+      - { name: User-Name,         code: 1,   type: UTF8String }
+      - { name: Session-Id,        code: 263, type: UTF8String }
+      - { name: Origin-Host,       code: 264, type: UTF8String }
+      - { name: Vendor-Id,         code: 266, type: Unsigned32 }
+      - { name: Result-Code,       code: 268, type: Unsigned32 }
+      - { name: Destination-Realm, code: 283, type: UTF8String }
+      - { name: Destination-Host,  code: 293, type: UTF8String }
+      - { name: Origin-Realm,      code: 296, type: UTF8String }
+      - { name: Experimental-Result,      code: 297, type: Grouped }
+      - { name: Experimental-Result-Code, code: 298, type: Unsigned32 }
+
+  cx:                                # TS 29.229 (I/S-CSCF <-> HSS)
+    application: 16777216
+    avps:
+      - { name: Public-Identity,           code: 601, vendor: 10415, type: UTF8String }
+      - { name: Server-Name,               code: 602, vendor: 10415, type: UTF8String }
+      - { name: Server-Capabilities,       code: 603, vendor: 10415, type: Grouped }
+      - { name: SIP-Number-Auth-Items,     code: 607, vendor: 10415, type: Unsigned32 }
+      - { name: SIP-Authentication-Scheme, code: 608, vendor: 10415, type: UTF8String }
+      - { name: SIP-Authenticate,          code: 609, vendor: 10415, type: OctetString }
+      - { name: SIP-Authorization,         code: 610, vendor: 10415, type: OctetString }
+      - { name: SIP-Auth-Data-Item,        code: 612, vendor: 10415, type: Grouped }
+      - { name: Server-Assignment-Type,    code: 614, vendor: 10415, type: Enumerated }
+      - { name: Deregistration-Reason,     code: 615, vendor: 10415, type: Grouped }
+      - { name: Reason-Code,               code: 616, vendor: 10415, type: Enumerated }
+      - { name: Reason-Info,               code: 617, vendor: 10415, type: UTF8String }
+      - { name: User-Authorization-Type,   code: 623, vendor: 10415, type: Enumerated }
+      - { name: Confidentiality-Key,       code: 625, vendor: 10415, type: OctetString }
+      - { name: Integrity-Key,             code: 626, vendor: 10415, type: OctetString }
+      # Shared with Sh; identical definition (see sh section).
+      - { name: User-Data,                 code: 606, vendor: 10415, type: OctetString }
+
+  sh:                                # TS 29.329 (AS <-> HSS)
+    application: 16777217
+    avps:
+      - { name: User-Name,       code: 1,                  type: UTF8String }
+      - { name: User-Data,       code: 606, vendor: 10415, type: OctetString }
+      - { name: MSISDN,          code: 701, vendor: 10415, type: OctetString }
+      - { name: Data-Reference,  code: 703, vendor: 10415, type: Enumerated }
+      - { name: Subs-Req-Type,   code: 705, vendor: 10415, type: Enumerated }

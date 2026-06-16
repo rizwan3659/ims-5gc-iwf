@@ -25,6 +25,33 @@
 //!     version: "3gpp-rel18"
 //!     rollout_percent: 100   # optional, default 100 (A/B staged rollout)
 //! ```
+//!
+//! `map_response` values are either the **name of a compiled plugin** (as
+//! above — the escape hatch for computed mappings) or an **inline answer
+//! spec** that the engine renders declaratively, so a new interface or NF
+//! service needs no Rust at all:
+//!
+//! ```yaml
+//!       - map_response:
+//!           200:
+//!             result_code: 2001
+//!             avps:
+//!               - { avp: Server-Name, from_json: "/serverName" }
+//!               - { avp: User-Data, from_body: true }
+//!               - avp: SIP-Auth-Data-Item
+//!                 group:
+//!                   - { avp: SIP-Authentication-Scheme, value: "Digest-AKAv1-MD5" }
+//!                   - avp: SIP-Authenticate
+//!                     required: true
+//!                     concat:
+//!                       - { from_json: "/av5gAka/rand", decode: hex }
+//!                       - { from_json: "/av5gAka/autn", decode: hex }
+//!           404: { experimental_result: 5001 }
+//!           default: { result_code: 5012 }
+//! ```
+//!
+//! AVP names resolve through the runtime [`crate::catalog::AvpCatalog`]
+//! (dictionary file or builtin), whose `type` drives the value encoding.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -34,6 +61,8 @@ use iwf_core::error::CoreError;
 use iwf_core::nf::NfType;
 use iwf_core::ports::SbiMethod;
 use serde::Deserialize;
+
+use crate::catalog::{AvpCatalog, AvpKind};
 
 /// Trigger: which Diameter requests a rule applies to.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -54,7 +83,7 @@ pub struct Trigger {
 pub enum Action {
     /// Pull an AVP value into a named variable.
     Extract {
-        /// AVP name (resolved via [`crate::mapping::avp_by_name`]).
+        /// AVP name (resolved via the [`AvpCatalog`]).
         avp: String,
         /// Variable name for later `{var}` substitution.
         var: String,
@@ -75,10 +104,119 @@ pub enum Action {
         /// string values).
         body: Option<serde_json::Value>,
     },
-    /// Map the most recent HTTP status to a named answer builder
-    /// (a [`crate::plugin::TranslationPlugin`] registered under that name).
-    /// The key `"default"` handles unlisted statuses.
-    MapResponse(BTreeMap<String, String>),
+    /// Derive a new variable by mapping the value of an existing variable
+    /// through a lookup table. Enables conditional routing without a full
+    /// branching language — e.g. SAR's `Server-Assignment-Type` → Nhss UECM
+    /// operation, or Sh `Data-Reference` → SDM_Get resource segment
+    /// (TS 29.562 §6 mappings). The mapped variable is then usable in
+    /// `{var}` templates.
+    SetVar {
+        /// Source variable name (typically a prior `extract`).
+        from: String,
+        /// Destination variable name.
+        var: String,
+        /// Value → value lookup table (keys are the source value as string).
+        /// An **empty** map means passthrough: the destination takes the
+        /// source value verbatim (or `default` if the source is unset).
+        map: BTreeMap<String, String>,
+        /// Fallback when the source value is absent or (with a non-empty map)
+        /// unmapped.
+        default: Option<String>,
+    },
+    /// Map the most recent HTTP status to an answer: either a named builder
+    /// (a [`crate::plugin::TranslationPlugin`] registered under that name)
+    /// or an inline declarative [`AnswerBuild`]. The key `"default"`
+    /// handles unlisted statuses.
+    MapResponse(BTreeMap<String, AnswerSpec>),
+}
+
+/// One `map_response` value: plugin by name, or a declarative build.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum AnswerSpec {
+    /// Name of a registered plugin (computed mappings, e.g. TBCD encode).
+    Plugin(String),
+    /// Inline JSON→AVP answer rendered by the engine — no code involved.
+    Build(AnswerBuild),
+}
+
+/// Declarative answer: result disposition plus mapped AVPs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerBuild {
+    /// `Result-Code` value (RFC 6733 §7.1), e.g. 2001 / 5012.
+    #[serde(default)]
+    pub result_code: Option<u32>,
+    /// 3GPP `Experimental-Result-Code` (TS 29.229 §6.2), rendered as the
+    /// grouped `Experimental-Result` with Vendor-Id 10415, e.g. 5001.
+    #[serde(default)]
+    pub experimental_result: Option<u32>,
+    /// AVPs appended to the answer, in order.
+    #[serde(default)]
+    pub avps: Vec<AvpSpec>,
+}
+
+/// One mapped answer AVP.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "AvpSpecYaml")]
+pub struct AvpSpec {
+    /// AVP name (resolved via the [`AvpCatalog`]; its `type` drives encoding).
+    pub avp: String,
+    /// Where the value comes from.
+    pub source: AvpSource,
+    /// When true, a missing source fails the transaction (→ 5012) instead
+    /// of skipping the AVP.
+    pub required: bool,
+}
+
+/// Value source of an answer AVP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AvpSource {
+    /// Literal with `{var}` substitution.
+    Value(String),
+    /// JSON pointer (RFC 6901) into the last HTTP response body. Missing
+    /// pointer / null → AVP skipped (unless `required`).
+    FromJson {
+        /// The pointer, e.g. `/serverName` or `/av5gAka/rand`.
+        pointer: String,
+        /// Optional byte decoding of the (string) value.
+        decode: Option<Decode>,
+    },
+    /// The raw response body bytes (e.g. `User-Data` echo).
+    FromBody,
+    /// Byte concatenation of several parts (e.g. RAND‖AUTN). Any missing
+    /// JSON part → AVP skipped (unless `required`).
+    Concat(Vec<ConcatPart>),
+    /// Nested grouped AVP. A group whose members all turn out missing is
+    /// itself skipped (unless `required`).
+    Group(Vec<AvpSpec>),
+}
+
+/// One part of a [`AvpSource::Concat`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "ConcatPartYaml")]
+pub struct ConcatPart {
+    /// JSON pointer or literal (with `{var}` substitution).
+    pub source: PartSource,
+    /// Optional byte decoding.
+    pub decode: Option<Decode>,
+}
+
+/// Where a concat part's bytes come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartSource {
+    /// JSON pointer into the response body.
+    Json(String),
+    /// Literal with `{var}` substitution.
+    Value(String),
+}
+
+/// Byte decoding applied to string-valued sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Decode {
+    /// Lower/upper-case hex string → octets (auth vectors per TS 29.509).
+    Hex,
 }
 
 /// `extract:` payload.
@@ -105,6 +243,113 @@ struct HttpRequestSpec {
     body: Option<serde_json::Value>,
 }
 
+/// `set_var:` payload.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetVarSpec {
+    from: String,
+    #[serde(rename = "as")]
+    var: String,
+    #[serde(default)]
+    map: BTreeMap<String, String>,
+    #[serde(default)]
+    default: Option<String>,
+}
+
+/// Wire shape of one answer AVP spec: a mapping with `avp` plus exactly one
+/// source key (`value` / `from_json` / `from_body` / `concat` / `group`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AvpSpecYaml {
+    avp: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    from_json: Option<String>,
+    #[serde(default)]
+    decode: Option<Decode>,
+    #[serde(default)]
+    from_body: Option<bool>,
+    #[serde(default)]
+    concat: Option<Vec<ConcatPart>>,
+    #[serde(default)]
+    group: Option<Vec<AvpSpec>>,
+    #[serde(default)]
+    required: bool,
+}
+
+impl TryFrom<AvpSpecYaml> for AvpSpec {
+    type Error = String;
+
+    fn try_from(y: AvpSpecYaml) -> Result<Self, Self::Error> {
+        let keys = usize::from(y.value.is_some())
+            + usize::from(y.from_json.is_some())
+            + usize::from(y.from_body.is_some())
+            + usize::from(y.concat.is_some())
+            + usize::from(y.group.is_some());
+        if keys != 1 {
+            return Err(format!(
+                "avp {}: exactly one of value / from_json / from_body / concat / group",
+                y.avp
+            ));
+        }
+        if y.decode.is_some() && y.from_json.is_none() {
+            return Err(format!("avp {}: decode requires from_json", y.avp));
+        }
+        let source = if let Some(v) = y.value {
+            AvpSource::Value(v)
+        } else if let Some(pointer) = y.from_json {
+            AvpSource::FromJson {
+                pointer,
+                decode: y.decode,
+            }
+        } else if let Some(parts) = y.concat {
+            AvpSource::Concat(parts)
+        } else if let Some(children) = y.group {
+            AvpSource::Group(children)
+        } else {
+            // keys == 1 and the others are None, so from_body is present.
+            if y.from_body != Some(true) {
+                return Err(format!("avp {}: from_body must be true", y.avp));
+            }
+            AvpSource::FromBody
+        };
+        Ok(AvpSpec {
+            avp: y.avp,
+            source,
+            required: y.required,
+        })
+    }
+}
+
+/// Wire shape of one concat part.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConcatPartYaml {
+    #[serde(default)]
+    from_json: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    decode: Option<Decode>,
+}
+
+impl TryFrom<ConcatPartYaml> for ConcatPart {
+    type Error = String;
+
+    fn try_from(y: ConcatPartYaml) -> Result<Self, Self::Error> {
+        let source = match (y.from_json, y.value) {
+            (Some(p), None) => PartSource::Json(p),
+            (None, Some(v)) => PartSource::Value(v),
+            _ => return Err("concat part: exactly one of from_json / value".to_owned()),
+        };
+        Ok(ConcatPart {
+            source,
+            decode: y.decode,
+        })
+    }
+}
+
 /// Wire shape of one action: a mapping with exactly one recognized key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,9 +357,11 @@ struct ActionMap {
     #[serde(default)]
     extract: Option<ExtractSpec>,
     #[serde(default)]
+    set_var: Option<SetVarSpec>,
+    #[serde(default)]
     http_request: Option<HttpRequestSpec>,
     #[serde(default)]
-    map_response: Option<BTreeMap<String, String>>,
+    map_response: Option<BTreeMap<String, AnswerSpec>>,
 }
 
 impl TryFrom<ActionMap> for Action {
@@ -122,11 +369,12 @@ impl TryFrom<ActionMap> for Action {
 
     fn try_from(m: ActionMap) -> Result<Self, Self::Error> {
         let keys = usize::from(m.extract.is_some())
+            + usize::from(m.set_var.is_some())
             + usize::from(m.http_request.is_some())
             + usize::from(m.map_response.is_some());
         if keys != 1 {
             return Err(
-                "each action must have exactly one of extract / http_request / map_response"
+                "each action must have exactly one of extract / set_var / http_request / map_response"
                     .to_owned(),
             );
         }
@@ -135,6 +383,14 @@ impl TryFrom<ActionMap> for Action {
                 avp: e.avp,
                 var: e.var,
                 required: e.required,
+            });
+        }
+        if let Some(s) = m.set_var {
+            return Ok(Action::SetVar {
+                from: s.from,
+                var: s.var,
+                map: s.map,
+                default: s.default,
             });
         }
         if let Some(h) = m.http_request {
@@ -146,7 +402,7 @@ impl TryFrom<ActionMap> for Action {
                 body: h.body,
             });
         }
-        // keys == 1 and the other two are None, so map_response is present.
+        // keys == 1 and the others are None, so map_response is present.
         m.map_response
             .map(Action::MapResponse)
             .ok_or_else(|| "unreachable: counted key missing".to_owned())
@@ -189,26 +445,32 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
-    /// Parse a YAML document.
+    /// Parse a YAML document, validating against the builtin AVP catalog.
     pub fn from_yaml(text: &str) -> Result<RuleSet, CoreError> {
+        RuleSet::from_yaml_with(text, &AvpCatalog::builtin())
+    }
+
+    /// Parse a YAML document, validating against `catalog`.
+    pub fn from_yaml_with(text: &str, catalog: &AvpCatalog) -> Result<RuleSet, CoreError> {
         let set: RuleSet = serde_yaml::from_str(text)
             .map_err(|e| CoreError::Adapter(format!("rule YAML parse: {e}")))?;
-        set.validate()?;
+        set.validate(catalog)?;
         Ok(set)
     }
 
-    /// Parse a TOML document with the same schema.
+    /// Parse a TOML document with the same schema (builtin catalog).
     pub fn from_toml(text: &str) -> Result<RuleSet, CoreError> {
         let set: RuleSet = toml::from_str(text)
             .map_err(|e| CoreError::Adapter(format!("rule TOML parse: {e}")))?;
-        set.validate()?;
+        set.validate(&AvpCatalog::builtin())?;
         Ok(set)
     }
 
     /// Structural validation beyond serde: ids unique, rollout sane,
-    /// referenced AVP names known, exactly one `map_response` per rule and it
-    /// must be last, status keys numeric or "default".
-    pub fn validate(&self) -> Result<(), CoreError> {
+    /// referenced AVP names known to `catalog`, exactly one `map_response`
+    /// per rule and it must be last, status keys numeric or "default",
+    /// inline answer specs well-formed.
+    pub fn validate(&self, catalog: &AvpCatalog) -> Result<(), CoreError> {
         let mut seen = std::collections::BTreeSet::new();
         for rule in &self.rules {
             if !seen.insert(&rule.id) {
@@ -235,7 +497,7 @@ impl RuleSet {
             for action in &rule.actions {
                 match action {
                     Action::Extract { avp, .. } => {
-                        if crate::mapping::avp_by_name(avp).is_none() {
+                        if catalog.get(avp).is_none() {
                             return Err(CoreError::Adapter(format!(
                                 "rule {}: unknown AVP name {avp}",
                                 rule.id
@@ -243,13 +505,24 @@ impl RuleSet {
                         }
                     }
                     Action::MapResponse(map) => {
-                        for key in map.keys() {
+                        for (key, spec) in map {
                             if key != "default" && key.parse::<u16>().is_err() {
                                 return Err(CoreError::Adapter(format!(
                                     "rule {}: map_response key {key} is neither a status nor 'default'",
                                     rule.id
                                 )));
                             }
+                            if let AnswerSpec::Build(build) = spec {
+                                validate_answer_build(&rule.id, key, build, catalog)?;
+                            }
+                        }
+                    }
+                    Action::SetVar { var, .. } => {
+                        if var.is_empty() {
+                            return Err(CoreError::Adapter(format!(
+                                "rule {}: set_var.as must be non-empty",
+                                rule.id
+                            )));
                         }
                     }
                     Action::HttpRequest { .. } => {}
@@ -284,19 +557,69 @@ impl RuleSet {
     }
 }
 
+/// Validate one inline answer spec against the catalog: exactly one result
+/// disposition, AVP names known, `group` if and only if the AVP is Grouped.
+fn validate_answer_build(
+    rule_id: &str,
+    status_key: &str,
+    build: &AnswerBuild,
+    catalog: &AvpCatalog,
+) -> Result<(), CoreError> {
+    let ctx = |msg: String| CoreError::Adapter(format!("rule {rule_id} ({status_key}): {msg}"));
+    if build.result_code.is_some() == build.experimental_result.is_some() {
+        return Err(ctx(
+            "exactly one of result_code / experimental_result".to_owned()
+        ));
+    }
+    fn check_specs(
+        specs: &[AvpSpec],
+        catalog: &AvpCatalog,
+        ctx: &impl Fn(String) -> CoreError,
+    ) -> Result<(), CoreError> {
+        for spec in specs {
+            let def = catalog
+                .get(&spec.avp)
+                .ok_or_else(|| ctx(format!("unknown AVP name {}", spec.avp)))?;
+            match &spec.source {
+                AvpSource::Group(children) => {
+                    if def.kind != AvpKind::Grouped {
+                        return Err(ctx(format!("{} is not Grouped", spec.avp)));
+                    }
+                    check_specs(children, catalog, ctx)?;
+                }
+                _ if def.kind == AvpKind::Grouped => {
+                    return Err(ctx(format!("{} is Grouped and needs `group:`", spec.avp)));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    check_specs(&build.avps, catalog, &ctx)
+}
+
 /// Hot-swappable rule holder. Readers pay one atomic load per transaction;
-/// writers (admin API / file watcher) validate then swap atomically, so a
-/// bad document can never become active.
+/// writers (admin API / file watcher) validate — against the catalog the
+/// store was built with — then swap atomically, so a bad document can never
+/// become active.
 #[derive(Debug, Default)]
 pub struct RuleStore {
     current: ArcSwap<RuleSet>,
+    catalog: Arc<AvpCatalog>,
 }
 
 impl RuleStore {
-    /// Store seeded with `initial`.
+    /// Store seeded with `initial`, validating reloads against the builtin
+    /// catalog.
     pub fn new(initial: RuleSet) -> Self {
+        RuleStore::with_catalog(initial, Arc::new(AvpCatalog::builtin()))
+    }
+
+    /// Store seeded with `initial`, validating reloads against `catalog`.
+    pub fn with_catalog(initial: RuleSet, catalog: Arc<AvpCatalog>) -> Self {
         RuleStore {
             current: ArcSwap::from_pointee(initial),
+            catalog,
         }
     }
 
@@ -308,7 +631,7 @@ impl RuleStore {
     /// Validate and atomically activate a new YAML document. On error the
     /// previous rules stay active.
     pub fn reload_yaml(&self, text: &str) -> Result<usize, CoreError> {
-        let set = RuleSet::from_yaml(text)?;
+        let set = RuleSet::from_yaml_with(text, &self.catalog)?;
         let n = set.rules.len();
         self.current.store(Arc::new(set));
         Ok(n)
@@ -387,6 +710,127 @@ rules:
     fn rejects_unknown_avp_name() {
         let bad = SAMPLE.replace("User-Name", "No-Such-AVP");
         assert!(RuleSet::from_yaml(&bad).is_err());
+    }
+
+    #[test]
+    fn inline_answer_specs_parse_alongside_plugins() {
+        let doc = r#"
+rules:
+  - id: r1
+    trigger: { diameter_application: 16777216, command_code: 302 }
+    actions:
+      - map_response:
+          200:
+            result_code: 2001
+            avps:
+              - { avp: Server-Name, from_json: "/serverName", required: true }
+              - avp: SIP-Auth-Data-Item
+                group:
+                  - { avp: SIP-Authentication-Scheme, value: "Digest-AKAv1-MD5" }
+                  - avp: SIP-Authenticate
+                    concat:
+                      - { from_json: "/rand", decode: hex }
+                      - { from_json: "/autn", decode: hex }
+          404: { experimental_result: 5001 }
+          default: build_unable_to_comply       # plugins still mix in
+    version: v1
+"#;
+        let set = RuleSet::from_yaml(doc).expect("parse");
+        match &set.rules[0].actions[0] {
+            Action::MapResponse(map) => {
+                assert!(matches!(map.get("200"), Some(AnswerSpec::Build(_))));
+                assert!(matches!(
+                    map.get("default"),
+                    Some(AnswerSpec::Plugin(p)) if p == "build_unable_to_comply"
+                ));
+            }
+            other => panic!("expected map_response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inline_answer_specs_are_validated() {
+        let with_default = |spec: &str| {
+            format!(
+                r#"
+rules:
+  - id: r1
+    trigger: {{ diameter_application: 1, command_code: 2 }}
+    actions:
+      - map_response:
+          default: {spec}
+    version: v1
+"#
+            )
+        };
+        // Well-formed minimal specs.
+        assert!(RuleSet::from_yaml(&with_default("{ result_code: 5012 }")).is_ok());
+        assert!(RuleSet::from_yaml(&with_default("{ experimental_result: 5001 }")).is_ok());
+        // Unknown AVP name.
+        assert!(RuleSet::from_yaml(&with_default(
+            "{ result_code: 2001, avps: [ { avp: No-Such, value: x } ] }"
+        ))
+        .is_err());
+        // Grouped AVP requires `group:`.
+        assert!(RuleSet::from_yaml(&with_default(
+            "{ result_code: 2001, avps: [ { avp: SIP-Auth-Data-Item, value: x } ] }"
+        ))
+        .is_err());
+        // `group:` on a non-grouped AVP.
+        assert!(RuleSet::from_yaml(&with_default(
+            "{ result_code: 2001, avps: [ { avp: Server-Name, group: [] } ] }"
+        ))
+        .is_err());
+        // Exactly one result disposition.
+        assert!(RuleSet::from_yaml(&with_default(
+            "{ result_code: 2001, experimental_result: 5001 }"
+        ))
+        .is_err());
+        assert!(RuleSet::from_yaml(&with_default("{ avps: [] }")).is_err());
+        // Exactly one source per AVP (rejected at deserialization).
+        assert!(RuleSet::from_yaml(&with_default(
+            "{ result_code: 2001, avps: [ { avp: Server-Name, value: x, from_body: true } ] }"
+        ))
+        .is_err());
+        assert!(RuleSet::from_yaml(&with_default(
+            "{ result_code: 2001, avps: [ { avp: Server-Name } ] }"
+        ))
+        .is_err());
+        // decode requires from_json.
+        assert!(RuleSet::from_yaml(&with_default(
+            "{ result_code: 2001, avps: [ { avp: Server-Name, value: x, decode: hex } ] }"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn custom_catalog_extends_the_dsl() {
+        let catalog = AvpCatalog::from_yaml(
+            r#"
+interfaces:
+  foo:
+    avps:
+      - { name: Foo-Token, code: 9001, vendor: 4242, type: UTF8String }
+"#,
+        )
+        .expect("catalog");
+        let doc = r#"
+rules:
+  - id: r1
+    trigger: { diameter_application: 1, command_code: 2 }
+    actions:
+      - extract: { avp: "Foo-Token", as: tok }
+      - map_response:
+          default: { result_code: 2001, avps: [ { avp: Foo-Token, value: "{tok}" } ] }
+    version: v1
+"#;
+        // Unknown to the builtin catalog…
+        assert!(RuleSet::from_yaml(doc).is_err());
+        // …valid against the loaded dictionary.
+        RuleSet::from_yaml_with(doc, &catalog).expect("valid with custom catalog");
+        // Reloads validate against the store's catalog, not the builtin.
+        let store = RuleStore::with_catalog(RuleSet::default(), Arc::new(catalog));
+        assert_eq!(store.reload_yaml(doc).expect("reload"), 1);
     }
 
     #[test]
