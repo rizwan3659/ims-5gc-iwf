@@ -712,11 +712,16 @@ impl RuleSet {
             for action in &rule.actions {
                 match action {
                     Action::Extract { avp, .. } => {
-                        if catalog.get(avp).is_none() {
-                            return Err(CoreError::Adapter(format!(
-                                "rule {}: unknown AVP name {avp}",
-                                rule.id
-                            )));
+                        // `avp` may be a `Parent/Child` path into a grouped AVP
+                        // (e.g. Sh `User-Identity/Public-Identity`); every
+                        // segment must be a known AVP name.
+                        for seg in avp.split('/') {
+                            if catalog.get(seg).is_none() {
+                                return Err(CoreError::Adapter(format!(
+                                    "rule {}: unknown AVP name {seg}",
+                                    rule.id
+                                )));
+                            }
                         }
                     }
                     Action::MapResponse(map) => {

@@ -69,10 +69,12 @@ pub const CMD_STR: u32 = 275;
 /// Abort-Session-Request/Answer (RFC 6733 §8.5).
 pub const CMD_ASR: u32 = 274;
 
-// ---- Ro command codes (TS 32.299 / RFC 4006) -------------------------------
+// ---- Ro/Rf command codes (TS 32.299) ---------------------------------------
 
-/// Credit-Control-Request/Answer (RFC 4006 §3.1).
+/// Credit-Control-Request/Answer (RFC 4006 §3.1) — Ro online charging.
 pub const CMD_CCR: u32 = 272;
+/// Accounting-Request/Answer (RFC 6733 §9.7) — Rf offline charging.
+pub const CMD_ACR: u32 = 271;
 
 // ---- Additional application ids --------------------------------------------
 
@@ -80,6 +82,8 @@ pub const CMD_CCR: u32 = 272;
 pub const APP_RX: u32 = 16_777_236;
 /// Diameter Credit-Control Application — Ro (RFC 4006 / TS 32.299).
 pub const APP_RO: u32 = 4;
+/// Diameter Base Accounting Application — Rf offline charging (TS 32.299).
+pub const APP_RF: u32 = 3;
 
 // ---- Base AVP codes (RFC 6733 §4.5) -----------------------------------------
 
@@ -166,6 +170,8 @@ pub const AVP_DATA_REFERENCE: u32 = 703;
 pub const AVP_USER_IDENTITY: u32 = 700;
 /// MSISDN (Sh, TS 29.329 §6.3.2A).
 pub const AVP_MSISDN: u32 = 701;
+/// Sh-User-Data (Sh, TS 29.329 §6.3.3) — distinct from Cx User-Data (606).
+pub const AVP_SH_USER_DATA: u32 = 702;
 /// Subs-Req-Type (Sh, TS 29.329 §6.3.6).
 pub const AVP_SUBS_REQ_TYPE: u32 = 705;
 
