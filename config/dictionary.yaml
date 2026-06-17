@@ -25,6 +25,15 @@ interfaces:
       - { name: Origin-Realm,      code: 296, type: UTF8String }
       - { name: Experimental-Result,      code: 297, type: Grouped }
       - { name: Experimental-Result-Code, code: 298, type: Unsigned32 }
+      - { name: Auth-Application-Id,           code: 258, type: Unsigned32 }
+      - { name: Vendor-Specific-Application-Id, code: 260, type: Grouped }
+      - { name: Auth-Session-State,            code: 277, type: Enumerated }
+      - { name: Origin-State-Id,               code: 278, type: Unsigned32 }
+      - { name: Route-Record,                  code: 282, type: UTF8String }
+      # 3GPP feature negotiation, shared across Cx/Sh (vendor 10415).
+      - { name: Supported-Features,            code: 628, vendor: 10415, type: Grouped }
+      - { name: Feature-List-ID,               code: 629, vendor: 10415, type: Unsigned32 }
+      - { name: Feature-List,                  code: 630, vendor: 10415, type: Unsigned32 }
 
   cx:                                # TS 29.229 (I/S-CSCF <-> HSS)
     application: 16777216
@@ -44,18 +53,37 @@ interfaces:
       - { name: User-Authorization-Type,   code: 623, vendor: 10415, type: Enumerated }
       - { name: Confidentiality-Key,       code: 625, vendor: 10415, type: OctetString }
       - { name: Integrity-Key,             code: 626, vendor: 10415, type: OctetString }
-      # Shared with Sh; identical definition (see sh section).
+      - { name: SIP-Item-Number,           code: 613, vendor: 10415, type: Unsigned32 }
+      - { name: User-Data-Already-Available, code: 624, vendor: 10415, type: Enumerated }
+      # Cx-User-Data (TS 29.229 §6.3.7) — the IMS subscription profile XML.
       - { name: User-Data,                 code: 606, vendor: 10415, type: OctetString }
+      # Charging addresses returned in SAA (TS 29.229 §6.3.7).
+      - { name: Charging-Information,                        code: 618, vendor: 10415, type: Grouped }
+      - { name: Primary-Event-Charging-Function-Name,        code: 619, vendor: 10415, type: UTF8String }
+      - { name: Secondary-Event-Charging-Function-Name,      code: 620, vendor: 10415, type: UTF8String }
+      - { name: Primary-Charging-Collection-Function-Name,   code: 621, vendor: 10415, type: UTF8String }
+      - { name: Secondary-Charging-Collection-Function-Name, code: 622, vendor: 10415, type: UTF8String }
+      # S-CSCF restoration info carried in SAR (TS 29.229 §6.3.49).
+      - { name: SCSCF-Restoration-Info,    code: 639, vendor: 10415, type: Grouped }
+      - { name: Restoration-Info,          code: 649, vendor: 10415, type: Grouped }
+      - { name: Path,                      code: 640, vendor: 10415, type: OctetString }
+      - { name: Contact,                   code: 641, vendor: 10415, type: OctetString }
+      - { name: Initial-CSeq-Sequence-Number, code: 654, vendor: 10415, type: Unsigned32 }
 
   sh:                                # TS 29.329 (AS <-> HSS)
     application: 16777217
     avps:
       - { name: User-Name,       code: 1,                  type: UTF8String }
       - { name: User-Identity,   code: 700, vendor: 10415, type: Grouped }
-      - { name: User-Data,       code: 606, vendor: 10415, type: OctetString }
+      # Sh user data is its OWN AVP (702) — distinct from Cx-User-Data (606).
+      - { name: Sh-User-Data,    code: 702, vendor: 10415, type: OctetString }
       - { name: MSISDN,          code: 701, vendor: 10415, type: OctetString }
       - { name: Data-Reference,  code: 703, vendor: 10415, type: Enumerated }
+      - { name: Service-Indication, code: 704, vendor: 10415, type: OctetString }
       - { name: Subs-Req-Type,   code: 705, vendor: 10415, type: Enumerated }
+      - { name: Requested-Domain, code: 706, vendor: 10415, type: Enumerated }
+      - { name: Current-Location, code: 707, vendor: 10415, type: Enumerated }
+      - { name: Requested-Nodes, code: 713, vendor: 10415, type: Unsigned32 }
       - { name: Expiry-Time,     code: 709, vendor: 10415, type: OctetString }
 
   rx:                                # TS 29.214 (P-CSCF/AF <-> PCF, Npcf_PolicyAuthorization)
@@ -71,6 +99,15 @@ interfaces:
       - { name: AF-Charging-Identifier,     code: 505, vendor: 10415, type: OctetString }
       - { name: Specific-Action,            code: 513, vendor: 10415, type: Enumerated }
       - { name: Media-Component-Description, code: 517, vendor: 10415, type: Grouped }
+      - { name: Media-Component-Number,     code: 518, vendor: 10415, type: Unsigned32 }
+      - { name: Media-Sub-Component,        code: 519, vendor: 10415, type: Grouped }
+      - { name: Flow-Number,                code: 509, vendor: 10415, type: Unsigned32 }
+      - { name: Flow-Usage,                 code: 512, vendor: 10415, type: Enumerated }
+      - { name: SIP-Forking-Indication,     code: 523, vendor: 10415, type: Enumerated }
+      - { name: Required-Access-Info,       code: 536, vendor: 10415, type: Enumerated }
+      - { name: IP-CAN-Type,                code: 1027, vendor: 10415, type: Enumerated }
+      - { name: RAT-Type,                   code: 1032, vendor: 10415, type: Enumerated }
+      - { name: 3GPP-User-Location-Info,    code: 22,  vendor: 10415, type: OctetString }
 
   ro:                                # TS 32.299 / RFC 4006 (CTF <-> CHF, Nchf_ConvergedCharging)
     application: 4
@@ -86,3 +123,42 @@ interfaces:
       - { name: Granted-Service-Unit,       code: 431, type: Grouped }
       - { name: CC-Time,                    code: 420, type: Unsigned32 }
       - { name: CC-Total-Octets,            code: 421, type: Unsigned64 }
+
+  rf:                                # TS 32.299 (IMS AS/TAS <-> CDF/CHF, Rf offline charging)
+    application: 3
+    avps:
+      # Diameter base accounting (RFC 6733 §9).
+      - { name: Acct-Application-Id,         code: 259, type: Unsigned32 }
+      - { name: Accounting-Record-Type,      code: 480, type: Enumerated }
+      - { name: Accounting-Record-Number,    code: 485, type: Unsigned32 }
+      - { name: Error-Message,               code: 281, type: UTF8String }
+      # 3GPP charging tree (TS 32.299, vendor 10415).
+      - { name: Service-Information,         code: 873,  vendor: 10415, type: Grouped }
+      - { name: IMS-Information,             code: 876,  vendor: 10415, type: Grouped }
+      - { name: Event-Type,                  code: 823,  vendor: 10415, type: Grouped }
+      - { name: SIP-Method,                  code: 824,  vendor: 10415, type: UTF8String }
+      - { name: Role-Of-Node,                code: 829,  vendor: 10415, type: Enumerated }
+      - { name: User-Session-ID,             code: 830,  vendor: 10415, type: UTF8String }
+      - { name: Calling-Party-Address,       code: 831,  vendor: 10415, type: UTF8String }
+      - { name: Called-Party-Address,        code: 832,  vendor: 10415, type: UTF8String }
+      - { name: Time-Stamps,                 code: 833,  vendor: 10415, type: Grouped }
+      - { name: SIP-Request-Timestamp,       code: 834,  vendor: 10415, type: OctetString }
+      - { name: Application-Server,          code: 836,  vendor: 10415, type: UTF8String }
+      - { name: Inter-Operator-Identifier,   code: 838,  vendor: 10415, type: Grouped }
+      - { name: Originating-IOI,             code: 839,  vendor: 10415, type: UTF8String }
+      - { name: Terminating-IOI,             code: 840,  vendor: 10415, type: UTF8String }
+      - { name: IMS-Charging-Identifier,     code: 841,  vendor: 10415, type: UTF8String }
+      - { name: Served-Party-IP-Address,     code: 848,  vendor: 10415, type: OctetString }
+      - { name: Application-Server-Information, code: 850, vendor: 10415, type: Grouped }
+      - { name: Cause-Code,                  code: 861,  vendor: 10415, type: Enumerated }
+      - { name: Node-Functionality,          code: 862,  vendor: 10415, type: Enumerated }
+      - { name: RAT-Type,                    code: 1032, vendor: 10415, type: Enumerated }
+      - { name: Called-Asserted-Identity,    code: 1250, vendor: 10415, type: UTF8String }
+      - { name: Access-Network-Information,  code: 1263, vendor: 10415, type: OctetString }
+      - { name: STN-SR,                      code: 1433, vendor: 10415, type: OctetString }
+      - { name: MMTel-Information,           code: 2030, vendor: 10415, type: Grouped }
+      - { name: Service-Mode,                code: 2032, vendor: 10415, type: Unsigned32 }
+      - { name: Supplementary-Service,       code: 2048, vendor: 10415, type: Grouped }
+      - { name: SIP-Request-Timestamp-Fraction, code: 2301, vendor: 10415, type: Unsigned32 }
+      - { name: Outgoing-Session-Id,         code: 2320, vendor: 10415, type: UTF8String }
+      - { name: IMS-Visited-Network-Identifier, code: 2713, vendor: 10415, type: UTF8String }

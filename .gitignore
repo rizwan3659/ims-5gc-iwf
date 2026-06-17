@@ -2,3 +2,7 @@
 **/*.rs.bk
 *.pcap
 /deploy/cdot/*.tgz
+
+# Large IMS Diameter/SIP captures (fixtures are extracted into tests/)
+/traces_ims/
+*.pcapng
