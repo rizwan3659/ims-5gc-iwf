@@ -415,12 +415,21 @@ fn error_answer(request: &Message, result_code: u32, local: &LocalIdentity) -> M
 }
 
 fn error_answer_for(request: &Message, e: &CoreError, local: &LocalIdentity) -> Message {
-    let code = match e {
-        CoreError::NoRule { .. } => dict::RC_COMMAND_UNSUPPORTED,
-        CoreError::MissingElement(_) => dict::RC_MISSING_AVP,
-        CoreError::NfUnavailable { .. } => dict::RC_UNABLE_TO_DELIVER,
-        CoreError::Overloaded => dict::RC_TOO_BUSY,
-        _ => dict::RC_UNABLE_TO_COMPLY,
+    use iwf_core::error::ErrorDisposition::*;
+    // Classification lives in `CoreError::disposition` (exhaustive); here we
+    // only map the small, stable disposition set onto Diameter Result-Codes.
+    // Transient conditions (downstream unavailable, deadline, overload) get a
+    // *retryable* code so the peer routes elsewhere — they no longer fall into
+    // the permanent 5012 bucket a `_` catch-all produced.
+    let code = match e.disposition() {
+        Unsupported => dict::RC_COMMAND_UNSUPPORTED, // 3001
+        MissingData => dict::RC_MISSING_AVP,         // 5005
+        InvalidInput => dict::RC_INVALID_AVP_VALUE,  // 5004
+        Unavailable => dict::RC_UNABLE_TO_DELIVER,   // 3002 (transient)
+        Overload => dict::RC_TOO_BUSY,               // 3004 (transient)
+        // User-unknown is normally surfaced as Experimental-Result 5001 by the
+        // rule's answer builder; this plain-Result-Code path is the fallback.
+        NotFound | Permanent => dict::RC_UNABLE_TO_COMPLY, // 5012
     };
     error_answer(request, code, local)
 }

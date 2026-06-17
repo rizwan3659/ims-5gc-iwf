@@ -66,7 +66,7 @@ pub struct PeerRegistry {
 
 impl std::fmt::Debug for PeerRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let n = self.peers.lock().map(|p| p.len()).unwrap_or(0);
+        let n = crate::lock::guard(&self.peers).len();
         f.debug_struct("PeerRegistry").field("peers", &n).finish()
     }
 }
@@ -91,18 +91,14 @@ impl PeerRegistry {
             hbh: Arc::new(AtomicU32::new(rand_seed())),
             e2e: Arc::new(AtomicU32::new(rand_seed())),
         };
-        if let Ok(mut peers) = self.peers.lock() {
-            peers.insert(origin_host.to_owned(), handle);
-        }
+        crate::lock::guard(&self.peers).insert(origin_host.to_owned(), handle);
         pending
     }
 
     /// Remove a connection on disconnect. Any still-pending waiters are dropped
     /// with the `pending` table by the connection task.
     pub fn deregister(&self, origin_host: &str) {
-        if let Ok(mut peers) = self.peers.lock() {
-            peers.remove(origin_host);
-        }
+        crate::lock::guard(&self.peers).remove(origin_host);
     }
 
     /// Originate `msg` to `origin_host` and await its answer.
@@ -118,10 +114,10 @@ impl PeerRegistry {
         timeout: Duration,
     ) -> Result<Message, OriginateError> {
         let (out_tx, pending, hbh, e2e) = {
-            let peers = self
-                .peers
-                .lock()
-                .map_err(|_| OriginateError::UnknownPeer(origin_host.to_owned()))?;
+            // Lock failure is no longer possible (a poisoned lock is recovered,
+            // not misreported as `UnknownPeer`); the only `UnknownPeer` is a
+            // genuinely-unregistered peer.
+            let peers = crate::lock::guard(&self.peers);
             let h = peers
                 .get(origin_host)
                 .ok_or_else(|| OriginateError::UnknownPeer(origin_host.to_owned()))?;
@@ -137,14 +133,10 @@ impl PeerRegistry {
         msg.header.end_to_end = e2e;
 
         let (tx, rx) = oneshot::channel();
-        if let Ok(mut p) = pending.lock() {
-            p.insert(hbh, tx);
-        }
+        crate::lock::guard(&pending).insert(hbh, tx);
 
         if out_tx.send(msg).await.is_err() {
-            if let Ok(mut p) = pending.lock() {
-                p.remove(&hbh);
-            }
+            crate::lock::guard(&pending).remove(&hbh);
             return Err(OriginateError::ConnectionGone(origin_host.to_owned()));
         }
 
@@ -152,9 +144,7 @@ impl PeerRegistry {
             Ok(Ok(answer)) => Ok(answer),
             Ok(Err(_)) => Err(OriginateError::ConnectionGone(origin_host.to_owned())),
             Err(_) => {
-                if let Ok(mut p) = pending.lock() {
-                    p.remove(&hbh);
-                }
+                crate::lock::guard(&pending).remove(&hbh);
                 Err(OriginateError::Timeout {
                     host: origin_host.to_owned(),
                     timeout,
@@ -170,7 +160,7 @@ impl PeerRegistry {
     /// Static so the reader loop can call it with just the connection's
     /// `pending` table (no registry lookup on the hot path).
     pub fn resolve_answer(pending: &Pending, hop_by_hop: u32, answer: Message) -> bool {
-        let waiter = pending.lock().ok().and_then(|mut p| p.remove(&hop_by_hop));
+        let waiter = crate::lock::guard(pending).remove(&hop_by_hop);
         match waiter {
             Some(tx) => tx.send(answer).is_ok(),
             None => false,
