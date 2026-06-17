@@ -162,30 +162,12 @@ impl TranslationEngine {
         for action in &rule.actions {
             match action {
                 Action::Extract { avp, var, required } => {
-                    // Name validity is guaranteed by RuleSet::validate.
-                    let def = catalog
-                        .get(avp)
-                        .ok_or(CoreError::MissingElement("known AVP name"))?;
-                    match request.find(def.code, def.vendor) {
-                        Some(found) => {
-                            // Type-aware: integer AVPs (Server-Assignment-Type,
-                            // Data-Reference, ...) are rendered as their decimal
-                            // string so `set_var` tables can key on them. We
-                            // can't infer this from bytes — a 4-octet
-                            // Enumerated is often valid UTF-8 — so the catalog
-                            // type decides.
-                            let value = if def.kind.is_integer() {
-                                found
-                                    .as_enum()
-                                    .map(|i| i.to_string())
-                                    .or_else(|_| found.as_u32().map(|u| u.to_string()))
-                                    .map_err(|e| CoreError::Adapter(format!("{avp}: {e}")))?
-                            } else {
-                                found
-                                    .as_utf8()
-                                    .map_err(|e| CoreError::Adapter(format!("{avp}: {e}")))?
-                                    .to_owned()
-                            };
+                    // `avp` is either a top-level name or a `Parent/Child`
+                    // path into a grouped AVP (e.g. Sh `User-Identity/
+                    // Public-Identity`). Name validity is guaranteed by
+                    // RuleSet::validate.
+                    match extract_value(request, &catalog, avp)? {
+                        Some(value) => {
                             ctx.vars.insert(var.clone(), value);
                         }
                         None if *required => {
@@ -550,6 +532,55 @@ impl TranslationEngine {
             .unwrap_or(0);
         format!("{};{now};{seq}", self.origin_host)
     }
+}
+
+/// Resolve an `extract` AVP reference — a top-level name or a `Parent/Child`
+/// path into nested grouped AVPs (e.g. Sh `User-Identity/Public-Identity`) —
+/// to its rendered string value. Integer-typed AVPs render as their decimal
+/// string (so `set_var` tables can key on them). `Ok(None)` if any segment is
+/// absent; the catalog type of the *final* segment decides the rendering.
+fn extract_value(
+    request: &Message,
+    catalog: &AvpCatalog,
+    name: &str,
+) -> Result<Option<String>, CoreError> {
+    let mut segments = name.split('/');
+    let first = segments.next().unwrap_or(name);
+    let mut def = *catalog
+        .get(first)
+        .ok_or(CoreError::MissingElement("known AVP name"))?;
+    let mut current = match request.find(def.code, def.vendor) {
+        Some(found) => found.clone(),
+        None => return Ok(None),
+    };
+    for seg in segments {
+        let members = current
+            .as_grouped()
+            .map_err(|e| CoreError::Adapter(format!("{name}: {e}")))?;
+        def = *catalog
+            .get(seg)
+            .ok_or(CoreError::MissingElement("known AVP name"))?;
+        match members
+            .into_iter()
+            .find(|a| a.code == def.code && a.vendor_id == def.vendor)
+        {
+            Some(found) => current = found,
+            None => return Ok(None),
+        }
+    }
+    let value = if def.kind.is_integer() {
+        current
+            .as_enum()
+            .map(|i| i.to_string())
+            .or_else(|_| current.as_u32().map(|u| u.to_string()))
+            .map_err(|e| CoreError::Adapter(format!("{name}: {e}")))?
+    } else {
+        current
+            .as_utf8()
+            .map_err(|e| CoreError::Adapter(format!("{name}: {e}")))?
+            .to_owned()
+    };
+    Ok(Some(value))
 }
 
 /// Whether a stateful action's `when` guard holds: no guard → always true;

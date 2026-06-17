@@ -108,6 +108,16 @@ fn hss_app() -> Router {
             })
             .put(|| async { axum::http::StatusCode::NO_CONTENT }),
         )
+        // Sh SNR → SDM Subscribe (POST): 201 with a subscription resource.
+        .route(
+            "/nhss-ims-sdm/v1/:imsUeId/subscriptions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::CREATED,
+                    axum::Json(serde_json::json!({"subscriptionId": "sub-1"})),
+                )
+            }),
+        )
         // Catch-all SDM_Get for the remaining Data-Reference resources.
         .route(
             "/nhss-ims-sdm/v1/:imsUeId/*rest",

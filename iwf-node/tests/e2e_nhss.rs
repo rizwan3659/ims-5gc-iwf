@@ -467,8 +467,8 @@ async fn nhss_flows_end_to_end() {
     let answer = session.transact(udr).await;
     assert_eq!(answer.result_code(), Some(dict::RC_SUCCESS));
     let user_data = answer
-        .find(dict::AVP_USER_DATA, Some(dict::VENDOR_3GPP))
-        .expect("User-Data");
+        .find(dict::AVP_SH_USER_DATA, Some(dict::VENDOR_3GPP))
+        .expect("Sh-User-Data");
     let body: serde_json::Value = serde_json::from_slice(&user_data.data).expect("json payload");
     assert_eq!(body["serverName"], "sip:scscf1.ims.example.org");
 
@@ -555,8 +555,8 @@ async fn sh_snr_then_pnr_notification() {
     );
     // The changed data was echoed from the notification body.
     let user_data = pnr
-        .find(dict::AVP_USER_DATA, Some(dict::VENDOR_3GPP))
-        .expect("User-Data");
+        .find(dict::AVP_SH_USER_DATA, Some(dict::VENDOR_3GPP))
+        .expect("Sh-User-Data");
     let body: serde_json::Value = serde_json::from_slice(&user_data.data).expect("json");
     assert_eq!(body["changed"], "profile-data");
 
