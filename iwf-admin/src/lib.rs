@@ -113,16 +113,19 @@ async fn metrics(State(state): State<AdminState>) -> impl IntoResponse {
     )
 }
 
+/// Hot-reload the log filter. The body is an `EnvFilter` directive string:
+/// a bare level (`debug`) or per-target directives
+/// (`info,iwf_diameter::transport=warn,iwf_sba=debug`). No restart.
 async fn put_log_level(
     State(state): State<AdminState>,
     headers: HeaderMap,
     body: String,
 ) -> Result<StatusCode, StatusCode> {
     authorize(&state, &headers, Permission::Operate)?;
-    let level = body.trim().trim_matches('"');
+    let directives = body.trim().trim_matches('"');
     match &state.log {
         Some(handle) => handle
-            .set_level(level)
+            .set_filter(directives)
             .map(|()| StatusCode::NO_CONTENT)
             .map_err(|_| StatusCode::BAD_REQUEST),
         None => Err(StatusCode::SERVICE_UNAVAILABLE),
