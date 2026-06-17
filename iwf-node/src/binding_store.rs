@@ -22,23 +22,25 @@ pub struct InMemoryBindings {
 #[async_trait]
 impl BindingStore for InMemoryBindings {
     async fn put(&self, id: String, binding: Binding) {
-        if let Ok(mut m) = self.map.lock() {
-            m.insert(id, binding);
-        }
+        crate::lock::guard(&self.map).insert(id, binding);
     }
 
+    // `get`/`take` now reflect the *true* map state even under lock poisoning
+    // (was: `.lock().ok()?` → silent `None`, which the notification server
+    // turns into a dropped subscription).
     async fn get(&self, id: &str) -> Option<Binding> {
-        self.map.lock().ok()?.get(id).cloned()
+        crate::lock::guard(&self.map).get(id).cloned()
     }
 
     async fn take(&self, id: &str) -> Option<Binding> {
-        self.map.lock().ok()?.remove(id)
+        crate::lock::guard(&self.map).remove(id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn binding(kind: &str) -> Binding {
         Binding {
@@ -63,5 +65,24 @@ mod tests {
         assert!(store.take("id-1").await.is_some());
         assert!(store.get("id-1").await.is_none());
         assert!(store.take("id-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn survives_lock_poisoning() {
+        // Regression for F1: a poisoned lock must NOT silently look empty
+        // (which would drop the subscription); the guard is recovered.
+        let store = Arc::new(InMemoryBindings::default());
+        store.put("id".to_owned(), binding("sh")).await;
+
+        let poisoner = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.map.lock().expect("lock");
+            panic!("poison the mutex while holding the guard");
+        })
+        .join(); // Err — the thread panicked, leaving the mutex poisoned.
+
+        // The binding is still there.
+        assert_eq!(store.get("id").await.map(|b| b.kind), Some("sh".to_owned()));
+        assert!(store.take("id").await.is_some(), "take recovers too");
     }
 }

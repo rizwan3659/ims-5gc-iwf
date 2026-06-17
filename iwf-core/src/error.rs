@@ -68,6 +68,64 @@ pub enum CoreError {
     Adapter(String),
 }
 
+/// Protocol-agnostic disposition of a [`CoreError`] — *what kind* of failure
+/// it is, independent of any wire encoding. Adapters map this onto their own
+/// status space (Diameter Result-Code, HTTP status), so the transient/
+/// permanent decision lives in one place and new [`CoreError`] variants are
+/// forced (by the exhaustive match in [`CoreError::disposition`]) to declare
+/// their disposition instead of silently defaulting to "permanent".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorDisposition {
+    /// The request/command is not supported (no rule / unknown command).
+    Unsupported,
+    /// A required element/AVP was absent.
+    MissingData,
+    /// The request was malformed (bad identity / value).
+    InvalidInput,
+    /// The subscriber is unknown.
+    NotFound,
+    /// **Transient**: a downstream NF was unreachable or the transaction timed
+    /// out — the peer may retry / route elsewhere.
+    Unavailable,
+    /// **Transient**: the node is shedding load (overload/backpressure).
+    Overload,
+    /// **Permanent**: the request cannot be satisfied / internal fault.
+    Permanent,
+}
+
+impl ErrorDisposition {
+    /// Whether the condition is transient (a retry could succeed).
+    pub fn is_transient(self) -> bool {
+        matches!(
+            self,
+            ErrorDisposition::Unavailable | ErrorDisposition::Overload
+        )
+    }
+}
+
+impl CoreError {
+    /// Classify this error into a protocol-agnostic [`ErrorDisposition`].
+    ///
+    /// Exhaustive (no `_` arm) so adding a `CoreError` variant fails to
+    /// compile until its disposition is declared — the guard against the
+    /// classification drift that a catch-all `=> Permanent` would hide.
+    pub fn disposition(&self) -> ErrorDisposition {
+        match self {
+            CoreError::NoRule { .. } => ErrorDisposition::Unsupported,
+            CoreError::MissingElement(_) => ErrorDisposition::MissingData,
+            CoreError::InvalidIdentity { .. } => ErrorDisposition::InvalidInput,
+            CoreError::UserUnknown => ErrorDisposition::NotFound,
+            // Transient downstream conditions — a retry may succeed.
+            CoreError::NfUnavailable { .. } | CoreError::DeadlineExceeded => {
+                ErrorDisposition::Unavailable
+            }
+            CoreError::Overloaded => ErrorDisposition::Overload,
+            // Permanent: the request cannot be satisfied or an adapter faulted.
+            CoreError::UnableToComply(_) | CoreError::Adapter(_) => ErrorDisposition::Permanent,
+        }
+    }
+}
+
 /// Convenience conversions used at port boundaries.
 pub trait ResultExt<T> {
     /// Convert any error into [`CoreError::Adapter`] with context.
@@ -77,5 +135,49 @@ pub trait ResultExt<T> {
 impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
     fn adapter_err(self, context: &'static str) -> Result<T, CoreError> {
         self.map_err(|e| CoreError::Adapter(format!("{context}: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disposition_classifies_transient_vs_permanent() {
+        // The deadline/downstream-unavailable cases are TRANSIENT (a retry may
+        // succeed) — the regression this guards (F3) is them being lumped into
+        // a permanent disposition.
+        assert_eq!(
+            CoreError::DeadlineExceeded.disposition(),
+            ErrorDisposition::Unavailable
+        );
+        assert!(CoreError::DeadlineExceeded.disposition().is_transient());
+        assert!(CoreError::NfUnavailable {
+            nf: "HSS",
+            reason: "timeout".to_owned()
+        }
+        .disposition()
+        .is_transient());
+        assert!(CoreError::Overloaded.disposition().is_transient());
+
+        // Permanent / client-error cases are not transient.
+        assert_eq!(
+            CoreError::NoRule {
+                application: 1,
+                command: 2
+            }
+            .disposition(),
+            ErrorDisposition::Unsupported
+        );
+        assert_eq!(
+            CoreError::MissingElement("User-Name").disposition(),
+            ErrorDisposition::MissingData
+        );
+        assert!(!CoreError::UnableToComply("x".to_owned())
+            .disposition()
+            .is_transient());
+        assert!(!CoreError::Adapter("x".to_owned())
+            .disposition()
+            .is_transient());
     }
 }
