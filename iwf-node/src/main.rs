@@ -7,6 +7,7 @@
 
 mod binding_store;
 mod diameter_front;
+mod lock;
 mod notification;
 mod peer_registry;
 

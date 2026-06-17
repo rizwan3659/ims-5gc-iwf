@@ -25,6 +25,6 @@ pub mod nf;
 pub mod ports;
 
 pub use auth::{AuthContext, AuthScheme};
-pub use error::{CoreError, ResultExt};
+pub use error::{CoreError, ErrorDisposition, ResultExt};
 pub use identity::{Gpsi, IdentityContext, Impi, Impu, Suci, Supi};
 pub use nf::NfType;
