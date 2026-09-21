@@ -1,9 +1,6 @@
 # IWF — IMS ↔ 5G Core Interworking Function
 
-Carrier-grade signaling node translating between IMS Diameter interfaces
-(Cx, Dx, Sh, SWx, Zh) and 5G Core service-based interfaces (UDM, UDR, AUSF,
-AMF, PCF via NRF discovery). Rust workspace, Kubernetes-native, zero-downtime
-upgrades.
+A Rust implementation of IMS Diameter to 5G Core service interworking. The workspace includes protocol decoding, peer handling, translation rules, service discovery and integration tests. Kubernetes and Helm deployment examples are included. See the remaining work below for integration gaps and the current TLS transport arrangement.
 
 ## Layout
 
@@ -46,7 +43,7 @@ Load test: `cargo run --release -p iwf-benchmark --bin loadgen -- host:3868
 --tps 25000 --connections 16 --seconds 300` (acceptance procedure:
 `docs/runbook.md` §Benchmarking).
 
-## Remaining scope (explicit, per the delivery mandate)
+## Remaining work
 
 1. **Direct rustls mTLS on the SBA client and Diameter listener** — TLS 1.3
    configs and hot-reload exist in `iwf-security`; the SBA connector and the
